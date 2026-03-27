@@ -1,0 +1,140 @@
+---
+###############################################################################
+# restore-vms.yml — Restore VMs and containers from vzdump backups
+#
+# Usage:
+#   ansible-playbook playbooks/restore-vms.yml -i inventory/hosts.yml \
+#     -e backup_dir=/mnt/nas-backup/proxmox/daily/2026-03-27
+#
+#   # Restore specific VMIDs only:
+#   ansible-playbook playbooks/restore-vms.yml -i inventory/hosts.yml \
+#     -e backup_dir=/mnt/nas-backup/proxmox/daily/2026-03-27 \
+#     -e restore_vmids="100,101,200"
+#
+#   # Restore to a different storage:
+#   ansible-playbook playbooks/restore-vms.yml -i inventory/hosts.yml \
+#     -e backup_dir=/mnt/nas-backup/proxmox/daily/2026-03-27 \
+#     -e restore_storage=local-lvm
+###############################################################################
+
+- name: Restore VMs and containers from backup
+  hosts: proxmox
+  become: true
+
+  vars:
+    backup_dir: ""                  # Required — path to the backup date directory
+    restore_vmids: ""               # Optional — comma-separated list of VMIDs
+    restore_storage: "local"        # Target storage for restored VMs
+    restore_start_vms: false        # Start VMs after restore?
+    restore_force: false            # Overwrite existing VMs with same VMID?
+
+  tasks:
+    - name: Validate backup_dir is set
+      ansible.builtin.assert:
+        that:
+          - backup_dir | length > 0
+        fail_msg: "You must specify backup_dir. Example: -e backup_dir=/mnt/nas-backup/proxmox/daily/2026-03-27"
+
+    - name: Check backup directory exists
+      ansible.builtin.stat:
+        path: "{{ backup_dir }}/vm-backups"
+      register: vm_backup_dir
+
+    - name: Fail if no VM backups found
+      ansible.builtin.assert:
+        that:
+          - vm_backup_dir.stat.exists
+        fail_msg: "No vm-backups directory found in {{ backup_dir }}"
+
+    - name: Find vzdump backup files
+      ansible.builtin.find:
+        paths: "{{ backup_dir }}/vm-backups"
+        patterns:
+          - "vzdump-qemu-*.vma*"
+          - "vzdump-qemu-*.zst"
+          - "vzdump-lxc-*.tar*"
+          - "vzdump-lxc-*.zst"
+        file_type: file
+      register: backup_files
+
+    - name: Show discovered backup files
+      ansible.builtin.debug:
+        msg: "Found {{ backup_files.files | length }} backup file(s)"
+
+    - name: Parse backup files into restore list
+      ansible.builtin.set_fact:
+        restore_list: >-
+          {{
+            backup_files.files
+            | map(attribute='path')
+            | select('search', 'vzdump-(qemu|lxc)-(\d+)-')
+            | list
+          }}
+
+    - name: Filter to requested VMIDs
+      ansible.builtin.set_fact:
+        restore_list: >-
+          {{
+            restore_list
+            | select('search', 'vzdump-(qemu|lxc)-(' + restore_vmids | replace(',', '|') + ')-')
+            | list
+          }}
+      when: restore_vmids | length > 0
+
+    - name: Show restore plan
+      ansible.builtin.debug:
+        msg: |
+          Restore plan:
+            Backup dir:     {{ backup_dir }}
+            Target storage: {{ restore_storage }}
+            Files to restore: {{ restore_list | length }}
+            Start after:    {{ restore_start_vms }}
+            Force overwrite: {{ restore_force }}
+
+          Files:
+          {% for f in restore_list %}
+            - {{ f | basename }}
+          {% endfor %}
+
+    - name: Restore QEMU VM backups
+      ansible.builtin.command:
+        cmd: >
+          qmrestore {{ item }}
+          --storage {{ restore_storage }}
+          {{ '--force' if restore_force else '' }}
+      loop: "{{ restore_list | select('search', 'vzdump-qemu-') | list }}"
+      register: qemu_results
+      failed_when: qemu_results.rc != 0
+
+    - name: Restore LXC container backups
+      ansible.builtin.command:
+        cmd: >
+          pct restore
+          {{ item | regex_search('vzdump-lxc-(\d+)-', '\\1') | first }}
+          {{ item }}
+          --storage {{ restore_storage }}
+          {{ '--force' if restore_force else '' }}
+      loop: "{{ restore_list | select('search', 'vzdump-lxc-') | list }}"
+      register: lxc_results
+      failed_when: lxc_results.rc != 0
+
+    - name: Start restored QEMU VMs
+      ansible.builtin.command:
+        cmd: "qm start {{ item | regex_search('vzdump-qemu-(\\d+)-', '\\1') | first }}"
+      loop: "{{ restore_list | select('search', 'vzdump-qemu-') | list }}"
+      when: restore_start_vms
+      ignore_errors: true
+
+    - name: Start restored LXC containers
+      ansible.builtin.command:
+        cmd: "pct start {{ item | regex_search('vzdump-lxc-(\\d+)-', '\\1') | first }}"
+      loop: "{{ restore_list | select('search', 'vzdump-lxc-') | list }}"
+      when: restore_start_vms
+      ignore_errors: true
+
+    - name: Restore summary
+      ansible.builtin.debug:
+        msg: |
+          VM restore complete!
+          QEMU VMs restored: {{ restore_list | select('search', 'vzdump-qemu-') | list | length }}
+          LXC containers restored: {{ restore_list | select('search', 'vzdump-lxc-') | list | length }}

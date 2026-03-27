@@ -1,0 +1,93 @@
+---
+###############################################################################
+# proxmox-extras — Custom role for config not covered by lae.proxmox
+#
+# Handles: datacenter.cfg, NAS mounts, additional storage backends from
+# the harvested storage.cfg, and any custom network tweaks.
+###############################################################################
+
+# ── Datacenter Configuration ─────────────────────────────────────────────────
+
+- name: Configure datacenter.cfg settings
+  ansible.builtin.lineinfile:
+    path: /etc/pve/datacenter.cfg
+    regexp: "^{{ item.key }}:"
+    line: "{{ item.key }}: {{ item.value }}"
+    create: true
+    mode: "0640"
+  loop: "{{ pve_datacenter_cfg | default({}) | dict2items }}"
+  tags: [datacenter]
+
+# ── Storage Backends ─────────────────────────────────────────────────────────
+# lae.proxmox handles common storage types. This task ensures any additional
+# storage backends from the harvest are present in storage.cfg.
+
+- name: Check current storage configuration
+  ansible.builtin.command:
+    cmd: pvesm status
+  register: current_storage
+  changed_when: false
+  tags: [storage]
+
+- name: Add NFS storage backends
+  ansible.builtin.command:
+    cmd: >
+      pvesm add nfs {{ item.id }}
+      --server {{ item.server }}
+      --export {{ item.export }}
+      --path {{ item.path | default('/mnt/pve/' + item.id) }}
+      --content {{ item.content | default('images,iso,backup') }}
+      {{ '--maxfiles ' + item.maxfiles | string if item.maxfiles is defined else '' }}
+  loop: "{{ pve_storages | default([]) | selectattr('type', 'equalto', 'nfs') | list }}"
+  when: item.id not in current_storage.stdout
+  ignore_errors: true
+  tags: [storage]
+
+- name: Add CIFS/SMB storage backends
+  ansible.builtin.command:
+    cmd: >
+      pvesm add cifs {{ item.id }}
+      --server {{ item.server }}
+      --share {{ item.share }}
+      --content {{ item.content | default('images,iso,backup') }}
+      {{ '--username ' + item.username if item.username is defined else '' }}
+      {{ '--password ' + item.password if item.password is defined else '' }}
+  loop: "{{ pve_storages | default([]) | selectattr('type', 'equalto', 'cifs') | list }}"
+  when: item.id not in current_storage.stdout
+  ignore_errors: true
+  no_log: true
+  tags: [storage]
+
+- name: Add directory storage backends
+  ansible.builtin.command:
+    cmd: >
+      pvesm add dir {{ item.id }}
+      --path {{ item.path }}
+      --content {{ item.content | default('images,iso,backup,rootdir,vztmpl') }}
+  loop: "{{ pve_storages | default([]) | selectattr('type', 'equalto', 'dir') | list }}"
+  when: item.id not in current_storage.stdout
+  ignore_errors: true
+  tags: [storage]
+
+- name: Add LVM-thin storage backends
+  ansible.builtin.command:
+    cmd: >
+      pvesm add lvmthin {{ item.id }}
+      --vgname {{ item.vgname }}
+      --thinpool {{ item.thinpool | default(item.id) }}
+      --content {{ item.content | default('images,rootdir') }}
+  loop: "{{ pve_storages | default([]) | selectattr('type', 'equalto', 'lvmthin') | list }}"
+  when: item.id not in current_storage.stdout
+  ignore_errors: true
+  tags: [storage]
+
+- name: Add ZFS-over-ISCSI storage backends
+  ansible.builtin.command:
+    cmd: >
+      pvesm add zfspool {{ item.id }}
+      --pool {{ item.pool }}
+      --content {{ item.content | default('images,rootdir') }}
+  loop: "{{ pve_storages | default([]) | selectattr('type', 'equalto', 'zfspool') | list }}"
+  when: item.id not in current_storage.stdout
+  ignore_errors: true
+  tags: [storage]

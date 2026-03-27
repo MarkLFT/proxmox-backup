@@ -1,0 +1,24 @@
+---
+# Ansible Galaxy dependencies for Proxmox host recovery
+#
+# Install with:
+#   ansible-galaxy install -r requirements.yml
+
+roles:
+  # The gold-standard role for configuring a Proxmox VE host from scratch.
+  # Handles: PVE install, repos, networking, storage backends, RBAC, Ceph,
+  # PCIe passthrough, ZFS, clustering, HA, kernel updates, and more.
+  # https://github.com/lae/ansible-role-proxmox
+  - name: lae.proxmox
+    version: ">=1.0.0"
+
+collections:
+  # Official Ansible collection for managing Proxmox VMs, containers, storage,
+  # and cluster resources via the Proxmox API.
+  # https://github.com/ansible-collections/community.proxmox
+  - name: community.proxmox
+    version: ">=1.0.0"
+
+  # General collection (some Proxmox modules still reference this during migration)
+  - name: community.general
+    version: ">=8.0.0"

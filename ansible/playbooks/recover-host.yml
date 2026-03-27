@@ -1,0 +1,193 @@
+---
+###############################################################################
+# recover-host.yml — Rebuild a Proxmox VE host from harvested Ansible vars
+#
+# This playbook takes a fresh Debian install (or minimal Proxmox install) and
+# configures it to match the backed-up host configuration.
+#
+# Prerequisites:
+#   1. Fresh Debian 12 (Bookworm) install with SSH access as root
+#   2. ansible-galaxy install -r requirements.yml
+#   3. ansible/host_vars/pve.yml populated (from backup or harvest script)
+#   4. Edit ansible/inventory/hosts.yml with the target host IP
+#
+# Usage:
+#   # Full recovery:
+#   ansible-playbook playbooks/recover-host.yml -i inventory/hosts.yml
+#
+#   # Dry run (check mode):
+#   ansible-playbook playbooks/recover-host.yml -i inventory/hosts.yml --check
+#
+#   # Only run specific tags:
+#   ansible-playbook playbooks/recover-host.yml -i inventory/hosts.yml --tags "network,storage"
+#
+# After this playbook completes, use restore-vms.yml or recover-vms.sh to
+# restore the VM/container backups.
+###############################################################################
+
+- name: Recover Proxmox VE host from backup
+  hosts: proxmox
+  become: true
+
+  vars:
+    # Override with --extra-vars if restoring from a specific backup
+    backup_vars_file: ""
+
+  pre_tasks:
+    # ── Load config from a specific backup if requested ──────────────────
+    - name: Load host vars from backup
+      ansible.builtin.include_vars:
+        file: "{{ backup_vars_file }}"
+      when: backup_vars_file | length > 0
+      tags: always
+
+    # ── Sanity checks ────────────────────────────────────────────────────
+    - name: Verify we are running on Debian
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Debian"
+        fail_msg: "This playbook requires Debian. Found: {{ ansible_distribution }}"
+      tags: always
+
+    - name: Show recovery plan
+      ansible.builtin.debug:
+        msg: |
+          Recovery Plan:
+            Target host:  {{ inventory_hostname }} ({{ ansible_host }})
+            PVE hostname: {{ pve_hostname | default('not set') }}
+            PVE version:  {{ pve_version | default('not set') }}
+            Cluster:      {{ pve_cluster_enabled | default(false) }}
+      tags: always
+
+  roles:
+    # ── Core Proxmox setup via lae.proxmox ───────────────────────────────
+    # This role handles: PVE installation, repos, networking, storage
+    # backends, RBAC, ZFS, Ceph, PCIe passthrough, etc.
+    #
+    # The role reads variables from host_vars/pve.yml which was generated
+    # by the harvest script.
+    - role: lae.proxmox
+      tags: [proxmox, core]
+
+    # ── Custom extras not covered by lae.proxmox ─────────────────────────
+    - role: proxmox-extras
+      tags: [extras]
+
+  post_tasks:
+    # ── Mount NAS for VM restore ─────────────────────────────────────────
+    - name: Create NAS mount point
+      ansible.builtin.file:
+        path: "{{ nas_backup_path }}"
+        state: directory
+        mode: "0755"
+      tags: [nas]
+
+    - name: Mount NAS via NFS
+      ansible.posix.mount:
+        src: "{{ nas_nfs_server }}:{{ nas_nfs_export }}"
+        path: "{{ nas_backup_path }}"
+        fstype: nfs
+        opts: "rw,soft,intr,timeo=300"
+        state: mounted
+      when: nas_nfs_server is defined
+      tags: [nas]
+
+    # ── Apply fstab entries from backup ──────────────────────────────────
+    - name: Restore fstab mount entries
+      ansible.posix.mount:
+        src: "{{ item.device }}"
+        path: "{{ item.mountpoint }}"
+        fstype: "{{ item.fstype }}"
+        opts: "{{ item.options }}"
+        dump: "{{ item.dump | default(0) }}"
+        passno: "{{ item.pass | default(0) }}"
+        state: present
+      loop: "{{ pve_fstab_entries | default([]) }}"
+      when: item.mountpoint != nas_backup_path
+      tags: [fstab]
+
+    # ── Apply sysctl settings ────────────────────────────────────────────
+    - name: Apply sysctl settings
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_set: true
+        reload: true
+      loop: "{{ pve_sysctl_settings | default({}) | dict2items }}"
+      tags: [sysctl]
+
+    # ── Kernel modules ───────────────────────────────────────────────────
+    - name: Load kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+        persistent: present
+      loop: "{{ pve_modules_load | default([]) }}"
+      tags: [kernel]
+
+    - name: Write modprobe config files
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "/etc/modprobe.d/{{ item.file }}"
+        mode: "0644"
+      loop: "{{ pve_modprobe_options | default([]) }}"
+      tags: [kernel]
+
+    # ── Install extra packages ───────────────────────────────────────────
+    - name: Install extra packages
+      ansible.builtin.apt:
+        name: "{{ pve_extra_packages | default([]) }}"
+        state: present
+        update_cache: true
+      tags: [packages]
+
+    # ── Restore cron jobs ────────────────────────────────────────────────
+    - name: Restore cron.d jobs
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "/etc/cron.d/{{ item.name }}"
+        mode: "0644"
+      loop: "{{ pve_cron_jobs | default([]) }}"
+      when: item.name != 'root-crontab'
+      tags: [cron]
+
+    # ── Restore firewall rules ───────────────────────────────────────────
+    - name: Ensure firewall directory exists
+      ansible.builtin.file:
+        path: /etc/pve/firewall
+        state: directory
+        mode: "0755"
+      when: pve_firewall_rules | default([]) | length > 0
+      tags: [firewall]
+
+    - name: Restore firewall rules
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "/etc/pve/firewall/{{ item.file }}"
+        mode: "0640"
+      loop: "{{ pve_firewall_rules | default([]) }}"
+      tags: [firewall]
+
+    # ── Restore vzdump defaults ──────────────────────────────────────────
+    - name: Restore vzdump.conf
+      ansible.builtin.copy:
+        content: "{{ pve_vzdump_conf }}"
+        dest: /etc/vzdump.conf
+        mode: "0644"
+      when: pve_vzdump_conf is defined
+      tags: [vzdump]
+
+    # ── Summary ──────────────────────────────────────────────────────────
+    - name: Recovery complete
+      ansible.builtin.debug:
+        msg: |
+          Host recovery complete!
+
+          Next steps:
+            1. Verify the host is accessible via the Proxmox web UI (https://{{ ansible_host }}:8006)
+            2. Restore VMs from backup:
+               ansible-playbook playbooks/restore-vms.yml -i inventory/hosts.yml \
+                 -e backup_dir=/mnt/nas-backup/proxmox/daily/2026-03-27
+            3. Or use the helper script on the host:
+               bash /opt/proxmox-backup/recover-vms.sh /mnt/nas-backup/proxmox/daily/2026-03-27
+      tags: always

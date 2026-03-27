@@ -1,0 +1,18 @@
+# Generated host vars (may contain hostnames, IPs, user info)
+ansible/host_vars/pve.yml
+
+# Local overrides
+proxmox-backup.local.conf
+
+# Logs
+*.log
+
+# Backup data
+backups/
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
