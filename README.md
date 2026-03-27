@@ -104,6 +104,52 @@ bash /opt/proxmox-backup/recover-vms.sh /mnt/nas-backup/proxmox/daily/2026-03-27
 A daily backup that falls on a Sunday is stored as weekly instead. A backup on the 1st
 is stored as monthly. This means each day produces exactly one backup in one tier.
 
+## Recovering to Different Hardware
+
+The harvester captures a **hardware fingerprint** (CPU, RAM, NIC names/MACs/drivers,
+disk models/serials/by-id paths, PCI devices) alongside the logical config. When you
+run the recovery playbook on new hardware, it automatically:
+
+1. **Detects the migration** — compares the original system model to the current host
+2. **Warns about NIC name changes** — old server had `enp3s0`, new one might have `eno1`
+3. **Fails early with clear instructions** if unmapped interfaces are found
+
+### What to do before recovery on new hardware
+
+```bash
+# 1. On the new server, check interface names:
+ip link show
+
+# 2. Edit the harvested config to remap interfaces:
+vi ansible/host_vars/pve.yml
+```
+
+Find the `pve_network_interface_map` section and update the `target` values:
+
+```yaml
+pve_network_interface_map:
+  - source: enp3s0    # Original interface on backed-up host
+    target: eno1      # ← Change this to match new hardware
+  - source: enp4s0
+    target: enp0s31f6
+```
+
+The playbook will automatically rewrite all network config (bridges, bonds,
+bridge_ports) using this map.
+
+### What transfers cleanly vs. what needs attention
+
+| Config | Cross-hardware? | Notes |
+|--------|:-:|-------|
+| VMs & containers | Yes | Virtualized — hardware independent |
+| Packages, repos, users, ACLs | Yes | Software-only |
+| Firewall, cron, sysctl | Yes | Software-only |
+| Storage (NFS/CIFS/dir) | Yes | Network or path based |
+| Network config | **Needs remap** | NIC names change per hardware |
+| Storage (LVM/ZFS on local disk) | **Needs review** | Device paths change |
+| PCIe passthrough | **Needs review** | IOMMU groups and PCI addresses change |
+| Kernel modules (modprobe) | **Usually fine** | May have old chipset-specific drivers |
+
 ## Dependencies
 
 - **On the Proxmox host**: `bash`, `vzdump`, `qm`, `pct` (all included with PVE)

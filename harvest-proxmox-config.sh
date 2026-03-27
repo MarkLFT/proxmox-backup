@@ -43,6 +43,81 @@ gather_kernel() {
     uname -r
 }
 
+gather_hardware_fingerprint() {
+    # Capture hardware-specific details so the recovery process can detect
+    # mismatches when restoring to different hardware.
+
+    echo "pve_hardware_fingerprint:"
+    echo "  generated: $(date -Iseconds)"
+
+    # CPU
+    local cpu_model
+    cpu_model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+    local cpu_cores
+    cpu_cores=$(nproc)
+    echo "  cpu_model: $(yaml_escape "$cpu_model")"
+    echo "  cpu_cores: ${cpu_cores}"
+
+    # RAM
+    local ram_mb
+    ram_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+    echo "  ram_mb: ${ram_mb}"
+
+    # Motherboard / system
+    local sys_vendor sys_product
+    sys_vendor=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || echo "unknown")
+    sys_product=$(cat /sys/class/dmi/id/product_name 2>/dev/null || echo "unknown")
+    echo "  system_vendor: $(yaml_escape "$sys_vendor")"
+    echo "  system_product: $(yaml_escape "$sys_product")"
+
+    # Network interface mapping: name → MAC, driver, PCI address
+    echo "  network_interfaces:"
+    for iface in /sys/class/net/*; do
+        local name
+        name=$(basename "$iface")
+        [[ "$name" == "lo" ]] && continue
+        local mac driver pci_addr
+        mac=$(cat "$iface/address" 2>/dev/null || echo "unknown")
+        driver=$(basename "$(readlink "$iface/device/driver" 2>/dev/null)" 2>/dev/null || echo "unknown")
+        pci_addr=$(basename "$(readlink "$iface/device" 2>/dev/null)" 2>/dev/null || echo "unknown")
+        echo "    - name: ${name}"
+        echo "      mac: ${mac}"
+        echo "      driver: ${driver}"
+        echo "      pci_address: ${pci_addr}"
+    done
+
+    # Disk mapping: device → model, serial, size, by-id path
+    echo "  disks:"
+    lsblk -dnpo NAME,SIZE,MODEL,SERIAL,TYPE 2>/dev/null | while read -r dev size model serial dtype; do
+        [[ "$dtype" == "disk" ]] || continue
+        local byid=""
+        # Find the /dev/disk/by-id/ symlink for this device
+        for link in /dev/disk/by-id/*; do
+            [[ -L "$link" ]] || continue
+            [[ "$(readlink -f "$link")" == "$dev" ]] || continue
+            # Prefer wwn- or scsi- links over ata- for stability
+            byid=$(basename "$link")
+            [[ "$byid" == wwn-* || "$byid" == scsi-* ]] && break
+        done
+        echo "    - device: ${dev}"
+        echo "      size: ${size}"
+        echo "      model: $(yaml_escape "${model:-unknown}")"
+        echo "      serial: $(yaml_escape "${serial:-unknown}")"
+        echo "      by_id: $(yaml_escape "${byid:-unknown}")"
+    done
+
+    # PCI devices (for passthrough reference)
+    echo "  pci_devices:"
+    lspci -nn 2>/dev/null | grep -iE '(vga|3d|network|ethernet|nvme|raid|sas|audio)' | while read -r line; do
+        local addr
+        addr=$(echo "$line" | cut -d' ' -f1)
+        local desc
+        desc=$(echo "$line" | cut -d' ' -f2-)
+        echo "    - address: '${addr}'"
+        echo "      description: $(yaml_escape "$desc")"
+    done
+}
+
 gather_network_interfaces() {
     # Parse /etc/network/interfaces into YAML
     local current_iface=""
@@ -358,8 +433,33 @@ pve_kernel: $(yaml_escape "$(gather_kernel)")
 # Set to true for single-node (non-clustered) setups
 pve_cluster_enabled: false
 
-# ─── Network Configuration ───────────────────────────────────────────────────
+# ─── Hardware Fingerprint (for migration detection) ─────────────────────────
+# If restoring to different hardware, the recovery playbook uses this section
+# to detect NIC name changes, disk path changes, and PCI address differences.
+# Review and update the network_interface_map below before running recovery.
 HEADER
+
+    gather_hardware_fingerprint
+    echo ""
+
+    # Generate a network interface map that can be edited for new hardware
+    echo "# ─── Network Interface Map (edit for hardware migration) ────────────────────"
+    echo "# Maps logical role → physical interface name."
+    echo "# If recovering to new hardware, update the 'target' values to match"
+    echo "# the new server's interface names (check with: ip link show)"
+    echo "pve_network_interface_map:"
+    for iface in /sys/class/net/*; do
+        local name
+        name=$(basename "$iface")
+        [[ "$name" == "lo" ]] && continue
+        echo "  - source: ${name}    # Original interface on backed-up host"
+        echo "    target: ${name}    # ← Change this if new hardware has different NIC names"
+    done
+    echo ""
+
+    echo "# ─── Network Configuration ───────────────────────────────────────────────────"
+    echo "# NOTE: Interface names below are from the ORIGINAL hardware."
+    echo "# The recovery playbook will remap them using pve_network_interface_map above."
 
     gather_network_interfaces
     echo ""

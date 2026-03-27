@@ -49,6 +49,23 @@
         fail_msg: "This playbook requires Debian. Found: {{ ansible_distribution }}"
       tags: always
 
+    # ── Hardware migration detection ────────────────────────────────────
+    - name: Gather current hardware facts
+      ansible.builtin.setup:
+        gather_subset:
+          - hardware
+          - network
+      tags: always
+
+    - name: Detect hardware migration
+      ansible.builtin.set_fact:
+        _hw_migration: >-
+          {{
+            (pve_hardware_fingerprint is defined) and
+            (pve_hardware_fingerprint.system_product | default('') != ansible_product_name | default(''))
+          }}
+      tags: always
+
     - name: Show recovery plan
       ansible.builtin.debug:
         msg: |
@@ -57,7 +74,99 @@
             PVE hostname: {{ pve_hostname | default('not set') }}
             PVE version:  {{ pve_version | default('not set') }}
             Cluster:      {{ pve_cluster_enabled | default(false) }}
+
+          {% if _hw_migration | bool %}
+          *** HARDWARE MIGRATION DETECTED ***
+            Original system: {{ pve_hardware_fingerprint.system_vendor | default('?') }} {{ pve_hardware_fingerprint.system_product | default('?') }}
+            Current system:  {{ ansible_system_vendor | default('?') }} {{ ansible_product_name | default('?') }}
+            Original CPU:    {{ pve_hardware_fingerprint.cpu_model | default('?') }} ({{ pve_hardware_fingerprint.cpu_cores | default('?') }} cores)
+            Current CPU:     {{ ansible_processor[2] | default('?') }} ({{ ansible_processor_vcpus | default('?') }} cores)
+            Original RAM:    {{ pve_hardware_fingerprint.ram_mb | default('?') }} MB
+            Current RAM:     {{ ansible_memtotal_mb | default('?') }} MB
+
+            IMPORTANT: Review pve_network_interface_map in host_vars/pve.yml
+            before proceeding. Interface names have likely changed.
+          {% else %}
+            Hardware: {{ ansible_system_vendor | default('?') }} {{ ansible_product_name | default('?') }}
+            (Same hardware or fingerprint not available — no migration needed)
+          {% endif %}
       tags: always
+
+    # ── Remap network interface names for new hardware ───────────────────
+    - name: Detect current network interfaces
+      ansible.builtin.set_fact:
+        _current_interfaces: "{{ ansible_interfaces | reject('equalto', 'lo') | list }}"
+      tags: [network, migration]
+
+    - name: Check for unmapped source interfaces
+      ansible.builtin.debug:
+        msg: |
+          WARNING: The network interface map references source interface '{{ item.source }}'
+          which should map to '{{ item.target }}' on this hardware.
+
+          Current interfaces on this host: {{ _current_interfaces | join(', ') }}
+
+          If '{{ item.target }}' does not exist on this host, edit host_vars/pve.yml
+          and update pve_network_interface_map before continuing.
+      loop: "{{ pve_network_interface_map | default([]) }}"
+      when:
+        - _hw_migration | bool
+        - item.target not in _current_interfaces
+      tags: [network, migration]
+
+    - name: Fail if mapped target interfaces don't exist
+      ansible.builtin.fail:
+        msg: |
+          HARDWARE MIGRATION ERROR: Interface '{{ item.target }}' (mapped from '{{ item.source }}')
+          does not exist on this host.
+
+          Available interfaces: {{ _current_interfaces | join(', ') }}
+
+          Fix: Edit ansible/host_vars/pve.yml and update pve_network_interface_map
+          with the correct interface names for this hardware, then re-run.
+
+          Tip: Run 'ip link show' on the target host to see available interfaces.
+      loop: "{{ pve_network_interface_map | default([]) }}"
+      when:
+        - _hw_migration | bool
+        - item.target not in _current_interfaces
+        - item.source != item.target
+      tags: [network, migration]
+
+    - name: Remap network interface names in config
+      ansible.builtin.set_fact:
+        pve_network_interfaces: >-
+          {{
+            pve_network_interfaces | default([]) | map('combine',
+              {'name': (pve_network_interface_map | default([])
+                | selectattr('source', 'equalto', item.name)
+                | map(attribute='target') | first | default(item.name)),
+               'bridge_ports': (item.bridge_ports | default('')
+                | regex_replace(
+                    (pve_network_interface_map | default([])
+                      | selectattr('source', 'equalto', item.bridge_ports | default(''))
+                      | map(attribute='source') | first | default('__NOMATCH__')),
+                    (pve_network_interface_map | default([])
+                      | selectattr('source', 'equalto', item.bridge_ports | default(''))
+                      | map(attribute='target') | first | default(item.bridge_ports | default('')))
+                  ))
+              }
+            ) | list
+          }}
+      loop: "{{ pve_network_interfaces | default([]) }}"
+      when: _hw_migration | bool
+      tags: [network, migration]
+
+    - name: Show final network configuration
+      ansible.builtin.debug:
+        msg: |
+          Network interfaces to configure:
+          {% for iface in pve_network_interfaces | default([]) %}
+            {{ iface.name }}: {{ iface.method | default('manual') }}
+              {%- if iface.address is defined %} addr={{ iface.address }}{% endif %}
+              {%- if iface.bridge_ports is defined %} bridge_ports={{ iface.bridge_ports }}{% endif %}
+          {% endfor %}
+      tags: [network, migration]
 
   roles:
     # ── Core Proxmox setup via lae.proxmox ───────────────────────────────
