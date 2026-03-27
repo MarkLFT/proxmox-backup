@@ -19,6 +19,7 @@ A backup and disaster recovery solution for a single-node Proxmox VE host.
   - [Overview](#overview)
   - [What You Need Before Disaster Strikes](#what-you-need-before-disaster-strikes)
   - [Phase 1 — Prepare the New Server (Debian)](#phase-1--prepare-the-new-server-debian)
+  - [Disk Configuration Examples](#disk-configuration-examples)
   - [Phase 2 — Prepare the Ansible Controller](#phase-2--prepare-the-ansible-controller)
   - [Phase 3 — Edit Config for New Hardware](#phase-3--edit-config-for-new-hardware)
   - [Phase 4 — Run Host Recovery](#phase-4--run-host-recovery)
@@ -197,8 +198,9 @@ full control over the process.
      so Ansible can reach it — this does not need to match the final config, just
      needs to be reachable
    - Create the **root** account with a password
-   - Partition the disks as you see fit — if recreating ZFS pools, leave the disks
-     unpartitioned (the Ansible role can create them)
+   - **Disk partitioning** — see the [Disk Configuration Examples](#disk-configuration-examples)
+     section below. Pick the scenario that matches your setup. **Read it before
+     you start the Debian installer.**
 
 3. **Enable SSH** (during install, or after first boot):
 
@@ -233,12 +235,14 @@ full control over the process.
 If you prefer to install Proxmox VE from the official ISO:
 
 1. **Download** the Proxmox VE ISO from https://www.proxmox.com/en/downloads
-2. **Install** with default settings
-3. **Verify SSH access** (SSH is enabled by default in Proxmox)
+2. **Install** with default settings — the installer handles disk partitioning for you
+3. **If using ZFS**: the Proxmox installer has a ZFS option on the disk selection screen.
+   Pick it there and select your disks. Much easier than doing it manually.
+4. **Verify SSH access** (SSH is enabled by default in Proxmox)
 
 > **Note**: With this option, `lae.proxmox` will skip the PVE installation step and
 > configure everything else on top of the existing install. Both options end up at the
-> same place.
+> same place. **If you are stressed and want the fewest decisions, use this option.**
 
 #### Server preparation checklist
 
@@ -249,6 +253,471 @@ After installing either option, verify:
 - [ ] You know the IP address
 - [ ] Hostname is set (ideally matching the original)
 - [ ] If using ZFS: disks are available and not mounted for data (check with `lsblk`)
+
+---
+
+### Disk Configuration Examples
+
+> **Take a breath.** Your backups are safe on the NAS. The VMs are safe. Nothing you
+> do to the disks on this new server can make things worse. You are just preparing an
+> empty server to receive the restore. If you partition it wrong, you can just wipe it
+> and start again — the backups don't care.
+
+Below are three common scenarios. Find the one that matches your situation, follow it
+step by step, then continue with [Phase 2](#phase-2--prepare-the-ansible-controller).
+
+---
+
+#### Example 1: Single disk, no ZFS (simplest — ext4)
+
+**Your old server**: One disk (e.g., 500 GB SSD), standard ext4/LVM partitioning, no ZFS.
+**Your new server**: One disk (any size, equal or larger).
+
+This is the simplest case. The Debian installer does almost everything for you.
+
+**During the Debian installer — Disk Partitioning screen:**
+
+1. Select **Guided - use entire disk and set up LVM**
+2. Select your disk (there's only one, so this is easy)
+3. Select **All files in one partition** (simplest)
+4. Confirm **Write changes to disk**
+5. The installer will create:
+   - A small `/boot` partition (~500 MB)
+   - An LVM volume group using the rest of the disk
+   - A root (`/`) logical volume
+   - A swap logical volume
+
+That's it. Finish the Debian install normally.
+
+**After install — verify:**
+
+```bash
+# SSH into the new server and check the disk layout:
+lsblk
+```
+
+You should see something like:
+
+```
+NAME                  SIZE TYPE MOUNTPOINT
+sda                 476.9G disk
+├─sda1                512M part /boot
+└─sda2              476.4G part
+  ├─pve-root        100.0G lvm  /
+  └─pve-swap          8.0G lvm  [SWAP]
+```
+
+**Then update `pve.yml`** — find the `pve_fstab_entries` section. If the old
+server used `/dev/sda` paths, these will still work because the new server also
+has a single disk at `/dev/sda`. If the device name is different (e.g., the new
+server uses NVMe so it's `/dev/nvme0n1`), update the paths:
+
+```yaml
+# OLD (SATA disk):
+pve_fstab_entries:
+  - device: '/dev/mapper/pve-root'
+    mountpoint: /
+    fstype: ext4
+
+# This is fine — LVM names are logical, not hardware-specific.
+# No changes needed.
+```
+
+> **The key point**: With LVM, the device mapper names (`/dev/mapper/pve-root`)
+> are the same regardless of whether the underlying disk is `/dev/sda` or
+> `/dev/nvme0n1`. So in most cases, **you don't need to change anything**.
+
+---
+
+#### Example 2: Single disk non-ZFS (old server) → Single disk ZFS (new server)
+
+**Your old server**: One disk, standard ext4/LVM, no ZFS.
+**Your new server**: One disk, and you want to use ZFS this time (better snapshots,
+checksums, compression).
+
+This is an upgrade scenario. The old server didn't use ZFS, but the new one will.
+
+**Option 2A: Use the Proxmox ISO installer (easiest)**
+
+If you use the **Proxmox VE ISO** instead of Debian, this is very straightforward:
+
+1. Boot the Proxmox ISO
+2. On the disk selection screen, click **Options**
+3. Change **Filesystem** to **zfs (RAID0)** (single disk, so RAID0 is the only option)
+4. Select your disk
+5. Adjust `ashift` if needed (leave default for most SSDs/NVMe)
+6. Continue the install
+
+Done. Proxmox creates the ZFS pool `rpool` with the OS on it, and a `local-zfs`
+storage backend for VMs. Skip ahead to "After install" below.
+
+**Option 2B: Use the Debian installer + manual ZFS setup**
+
+This takes more steps but gives you full control.
+
+1. **During Debian installer** — partition the disk manually:
+   - Create a **512 MB** partition → format as **ext2** → mount as `/boot`
+     (ZFS cannot be the boot filesystem with legacy BIOS)
+   - Create a **2 MB** partition → type **biosgrub** (if using BIOS boot) or
+     **512 MB EFI System Partition** (if using UEFI)
+   - Leave **all remaining space unpartitioned** (this is where ZFS will go)
+
+   > **If you're not sure about BIOS vs UEFI**: Check your new server's boot
+   > screen. If it says "UEFI" anywhere, use the EFI partition. Most servers
+   > from the last 5 years are UEFI.
+
+2. **Finish the Debian install** — it will install the root filesystem on the
+   small partition temporarily. We'll move to ZFS after.
+
+3. **After first boot — install ZFS and create the pool:**
+
+   ```bash
+   # Install ZFS packages
+   apt update
+   apt install -y zfsutils-linux
+
+   # Check which partition is free:
+   lsblk
+   # You should see an unpartitioned space. Let's say the disk is /dev/sda
+   # and the free space is /dev/sda3 (or the whole disk if you used a
+   # separate boot disk). Adjust the device name below to match YOUR disk.
+
+   # Find your disk's ID (more reliable than /dev/sdX names):
+   ls -la /dev/disk/by-id/ | grep -v part
+   # Example output:
+   #   ata-Samsung_SSD_870_EVO_S1234567 -> ../../sda
+
+   # Create the ZFS pool using the disk ID:
+   zpool create -f \
+     -o ashift=12 \
+     -O compression=lz4 \
+     -O acltype=posixacl \
+     -O xattr=sa \
+     -O relatime=on \
+     rpool /dev/disk/by-id/ata-Samsung_SSD_870_EVO_S1234567-part3
+
+   # Verify:
+   zpool status
+   zpool list
+   ```
+
+4. **Create datasets for Proxmox:**
+
+   ```bash
+   # Root dataset for VM images
+   zfs create rpool/data
+
+   # Optional: dataset for container rootfs
+   zfs create rpool/data/subvol
+
+   # Verify:
+   zfs list
+   ```
+
+**After install — update `pve.yml`:**
+
+Since the old server didn't use ZFS, there won't be a `pve_zfs_pools` section.
+The Ansible playbook doesn't create ZFS pools (that's too dangerous to automate
+on potentially wrong disks). The pool you just created manually is ready to use.
+
+You do need to add the ZFS storage backend. Edit `pve.yml` and add to
+`pve_storages`:
+
+```yaml
+pve_storages:
+  # ... keep existing NFS/CIFS entries ...
+  - id: local-zfs
+    type: zfspool
+    pool: 'rpool/data'
+    content: 'images,rootdir'
+    sparse: '1'
+```
+
+When restoring VMs later, use `--storage local-zfs`:
+
+```bash
+/opt/proxmox-backup/recover-vms.sh /mnt/nas-backup/proxmox/daily/2026-03-27 \
+  --storage local-zfs
+```
+
+---
+
+#### Example 3: Multiple ZFS disks (old server) → Multiple ZFS disks (new server)
+
+**Your old server**: Multiple disks in ZFS mirror/RAIDZ (e.g., 4x 2TB in RAIDZ1).
+**Your new server**: Multiple disks, want the same ZFS layout (possibly different
+disk sizes or models).
+
+This is the most involved scenario, but don't worry — ZFS is very forgiving about
+hardware changes. It cares about pool structure, not specific disk models.
+
+**Step 1: Check what the old server had**
+
+Open your `pve.yml` and find the `pve_hardware_fingerprint` section:
+
+```yaml
+pve_hardware_fingerprint:
+  disks:
+    - device: /dev/sda
+      size: 1.8T
+      model: 'ST2000DM008'
+      serial: 'ZFL12345'
+      by_id: 'ata-ST2000DM008-ZFL12345'
+    - device: /dev/sdb
+      size: 1.8T
+      model: 'ST2000DM008'
+      serial: 'ZFL12346'
+      by_id: 'ata-ST2000DM008-ZFL12346'
+    - device: /dev/sdc
+      size: 1.8T
+      model: 'ST2000DM008'
+      serial: 'ZFL12347'
+      by_id: 'ata-ST2000DM008-ZFL12347'
+    - device: /dev/sdd
+      size: 1.8T
+      model: 'ST2000DM008'
+      serial: 'ZFL12348'
+      by_id: 'ata-ST2000DM008-ZFL12348'
+```
+
+And the `pve_zfs_pools` section:
+
+```yaml
+pve_zfs_pools:
+  - name: rpool
+    state: ONLINE
+    properties:
+      ashift: 12
+      autotrim: on
+      compression: lz4
+```
+
+Also check `pve_zfs_datasets` to see what datasets existed.
+
+**Step 2: Identify disks on the new server**
+
+```bash
+# SSH into the new server:
+ssh root@<new-server-ip>
+
+# List all disks:
+lsblk -d -o NAME,SIZE,MODEL,SERIAL
+
+# Example output:
+# NAME    SIZE MODEL              SERIAL
+# sda   447.1G Samsung SSD 870    S123
+# sdb     3.6T WDC WD4003FRYZ     WD-456A
+# sdc     3.6T WDC WD4003FRYZ     WD-456B
+# sdd     3.6T WDC WD4003FRYZ     WD-456C
+# sde     3.6T WDC WD4003FRYZ     WD-456D
+
+# Get the stable disk IDs (ALWAYS use these, never /dev/sdX):
+ls -la /dev/disk/by-id/ | grep -v part | grep -v wwn
+```
+
+In this example: `sda` is the OS SSD, `sdb-sde` are the data disks (replacing
+the old 4x 2TB with 4x 4TB).
+
+**Step 3: Install the OS on the boot disk**
+
+During the Debian installer (or Proxmox ISO):
+- Install the OS onto `sda` (the SSD)
+- **Do NOT touch `sdb`, `sdc`, `sdd`, `sde`** — leave them completely
+  unpartitioned. ZFS will use them as whole disks.
+
+> **If using the Proxmox ISO**: On the disk selection screen, select ONLY the
+> boot SSD. Do NOT select the data disks here. We'll add those to a ZFS pool
+> manually after the install, so we can control the exact layout.
+
+**Step 4: Create the ZFS pool after first boot**
+
+```bash
+# SSH in:
+ssh root@<new-server-ip>
+
+# Install ZFS (skip if you used the Proxmox ISO — it's already installed):
+apt update && apt install -y zfsutils-linux
+
+# Find disk IDs for your data disks:
+ls -la /dev/disk/by-id/ | grep -v part | grep -v wwn
+
+# Example output:
+#   ata-WDC_WD4003FRYZ_WD-456A -> ../../sdb
+#   ata-WDC_WD4003FRYZ_WD-456B -> ../../sdc
+#   ata-WDC_WD4003FRYZ_WD-456C -> ../../sdd
+#   ata-WDC_WD4003FRYZ_WD-456D -> ../../sde
+```
+
+Now create the pool. **Match the RAID level from your old server.** Check
+`pve.yml` — if you're not sure what it was, check the `pve_zfs_pools` section
+or look at how many disks there were:
+
+```bash
+# ── MIRROR (2 disks, like RAID1 — 50% usable space) ──
+zpool create -f \
+  -o ashift=12 \
+  -O compression=lz4 \
+  -O acltype=posixacl \
+  -O xattr=sa \
+  -O relatime=on \
+  tank mirror \
+    /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456A \
+    /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456B
+
+# ── RAIDZ1 (3+ disks, like RAID5 — one disk of parity) ──
+zpool create -f \
+  -o ashift=12 \
+  -O compression=lz4 \
+  -O acltype=posixacl \
+  -O xattr=sa \
+  -O relatime=on \
+  tank raidz1 \
+    /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456A \
+    /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456B \
+    /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456C \
+    /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456D
+
+# ── RAIDZ2 (4+ disks, like RAID6 — two disks of parity) ──
+zpool create -f \
+  -o ashift=12 \
+  -O compression=lz4 \
+  -O acltype=posixacl \
+  -O xattr=sa \
+  -O relatime=on \
+  tank raidz2 \
+    /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456A \
+    /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456B \
+    /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456C \
+    /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456D
+
+# ── STRIPED MIRROR (4 disks, like RAID10 — fast + redundant) ──
+zpool create -f \
+  -o ashift=12 \
+  -O compression=lz4 \
+  -O acltype=posixacl \
+  -O xattr=sa \
+  -O relatime=on \
+  tank \
+    mirror /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456A \
+           /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456B \
+    mirror /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456C \
+           /dev/disk/by-id/ata-WDC_WD4003FRYZ_WD-456D
+```
+
+> **Not sure which RAID level you had?** Look at `pve.yml` under
+> `pve_hardware_fingerprint.disks`. Count the disks. If there were 2, it was
+> probably mirror. If 3-4, probably RAIDZ1. If 5+, could be RAIDZ2. When in
+> doubt, use RAIDZ1 — it's the most common for small-to-medium setups.
+
+**Step 5: Create datasets to match the old server**
+
+Check `pve_zfs_datasets` in your `pve.yml` and recreate them:
+
+```bash
+# Typical Proxmox datasets:
+zfs create tank/data              # VM disk images
+zfs create tank/data/subvol       # Container rootfs
+
+# If you had additional datasets, create those too.
+# Check pve_zfs_datasets in pve.yml for the full list.
+
+# Verify everything:
+zpool status
+zfs list
+```
+
+**Step 6: Enable autotrim (for SSDs) if the old server had it**
+
+```bash
+# Check if the old config had autotrim:
+# Look in pve.yml → pve_zfs_pools → properties → autotrim
+
+# If yes:
+zpool set autotrim=on tank
+```
+
+**Step 7: Update `pve.yml` with the new storage backend**
+
+Make sure the `pve_storages` section has the ZFS storage:
+
+```yaml
+pve_storages:
+  # ... keep existing entries ...
+  - id: local-zfs
+    type: zfspool
+    pool: 'tank/data'          # ← Match your pool/dataset name
+    content: 'images,rootdir'
+    sparse: '1'
+```
+
+> **Important**: If the old server's pool was called `rpool` and you named the
+> new one `tank` (or vice versa), update the pool name in `pve_storages` to match
+> what you just created. The name doesn't matter — just be consistent.
+
+**Step 8: Verify, then continue with recovery**
+
+```bash
+# Final check:
+zpool status    # Should show ONLINE, no errors
+zfs list        # Should show your datasets
+lsblk           # Should show the ZFS pool using the right disks
+```
+
+Now continue with [Phase 2](#phase-2--prepare-the-ansible-controller). When you
+get to Phase 5 (VM restore), use:
+
+```bash
+/opt/proxmox-backup/recover-vms.sh /mnt/nas-backup/proxmox/daily/2026-03-27 \
+  --storage local-zfs
+```
+
+---
+
+#### Quick reference: Which disks go where?
+
+```
+┌──────────────────────────────────────────────────┐
+│  Example 1: Single disk, no ZFS                  │
+│                                                  │
+│  ┌──────────────────────────────────┐            │
+│  │ /dev/sda (or /dev/nvme0n1)      │            │
+│  │  ├── /boot    (512 MB)          │            │
+│  │  ├── / (root) (LVM, ext4)       │            │
+│  │  └── swap     (LVM)             │            │
+│  └──────────────────────────────────┘            │
+│  Debian installer does this automatically.       │
+└──────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────┐
+│  Example 2: Single disk, ZFS                     │
+│                                                  │
+│  ┌──────────────────────────────────┐            │
+│  │ /dev/sda                        │            │
+│  │  ├── /boot or EFI  (512 MB)     │            │
+│  │  ├── / (root)      (ext4/ZFS)   │            │
+│  │  └── rpool/data    (ZFS)        │            │
+│  └──────────────────────────────────┘            │
+│  Easiest: Use the Proxmox ISO, select ZFS.       │
+└──────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────┐
+│  Example 3: Boot SSD + ZFS data disks            │
+│                                                  │
+│  ┌──────────────┐  ┌────────────────────────┐    │
+│  │ /dev/sda     │  │ /dev/sdb,sdc,sdd,sde  │    │
+│  │ (boot SSD)   │  │ (data disks)          │    │
+│  │  ├── /boot   │  │                        │    │
+│  │  ├── / (root)│  │  ZFS pool "tank"       │    │
+│  │  └── swap    │  │  ├── tank/data         │    │
+│  └──────────────┘  │  └── tank/data/subvol  │    │
+│                     └────────────────────────┘    │
+│  Install OS on SSD. Create ZFS pool manually     │
+│  after boot. Do NOT let the installer touch       │
+│  the data disks.                                  │
+└──────────────────────────────────────────────────┘
+```
+
+---
 
 ### Phase 2 — Prepare the Ansible Controller
 
