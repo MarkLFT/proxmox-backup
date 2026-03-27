@@ -6,10 +6,28 @@ A two-part backup strategy for a single-node Proxmox VE host:
    can be rebuilt from scratch using the `lae.proxmox` Ansible role.
 2. **VMs & containers** — backed up via `vzdump` with GFS rotation to a NAS.
 
+## Quick Install
+
+Run this on your Proxmox host as root — the installer will ask for your NAS details,
+backup schedule, and retention settings interactively:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/MarkLFT/proxmox-backup/master/install.sh | bash
+```
+
+Or download and inspect first:
+
+```bash
+curl -sSL -o install.sh https://raw.githubusercontent.com/MarkLFT/proxmox-backup/master/install.sh
+less install.sh
+bash install.sh
+```
+
 ## Architecture
 
 ```
 proxmox-backup/
+├── install.sh                   # One-line curl installer
 ├── README.md
 ├── harvest-proxmox-config.sh    # Runs on PVE host, generates Ansible vars
 ├── proxmox-backup.sh            # Main backup script (harvester + vzdump + GFS)
@@ -33,15 +51,17 @@ proxmox-backup/
 └── recover-vms.sh               # Quick VM restore helper script
 ```
 
-## Quick Start
+## Manual Setup
+
+If you prefer not to use the curl installer:
 
 ### 1. Install on the Proxmox host
 
 ```bash
-# Copy files to the host
-scp -r proxmox-backup/ root@pve:/opt/proxmox-backup/
+# Clone the repo
+git clone https://github.com/MarkLFT/proxmox-backup.git /opt/proxmox-backup
 
-# On the host: edit config
+# Edit config
 vi /opt/proxmox-backup/proxmox-backup.conf
 
 # Mount your NAS
