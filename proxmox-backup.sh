@@ -43,7 +43,7 @@ VZDUMP_TMPDIR=""
 VZDUMP_EXTRA_ARGS=""
 EXCLUDE_VMIDS=""
 
-NOTIFY_EMAIL=""
+NOTIFY_LEVEL="failure"
 LOG_FILE="/var/log/proxmox-backup.log"
 HARVEST_ENABLED=true
 MIN_FREE_GB=50
@@ -388,7 +388,21 @@ backup_vms() {
 send_notification() {
     local status="$1" tier="$2" dest_dir="$3"
 
-    [[ -n "$NOTIFY_EMAIL" ]] || return
+    [[ "$NOTIFY_LEVEL" != "none" ]] || return
+
+    # Skip notification for successful backups when NOTIFY_LEVEL is "failure"
+    if [[ "$NOTIFY_LEVEL" == "failure" && "$status" == "SUCCESS" ]]; then
+        log_info "Backup succeeded — skipping email notification (NOTIFY_LEVEL=failure)."
+        return
+    fi
+
+    # Read root@pam email from Proxmox user config
+    local email
+    email=$(grep '^user:root@pam:' /etc/pve/user.cfg 2>/dev/null | cut -d: -f7)
+    if [[ -z "$email" ]]; then
+        log_warn "No email configured for root@pam in Proxmox — skipping notification."
+        return
+    fi
 
     local subject="Proxmox Backup ${status}: $(hostname) [${tier}] $(date +%Y-%m-%d)"
     local body
@@ -396,8 +410,8 @@ send_notification() {
     body+="Destination: ${dest_dir}\nDate: $(date)\n\n"
     body+="--- Last 50 lines of log ---\n$(tail -50 "$LOG_FILE")"
 
-    echo -e "$body" | mail -s "$subject" "$NOTIFY_EMAIL" 2>/dev/null || \
-        log_warn "Failed to send email notification."
+    echo -e "$body" | mail -s "$subject" "$email" 2>/dev/null || \
+        log_warn "Failed to send email notification to ${email}."
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

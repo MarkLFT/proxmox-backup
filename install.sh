@@ -301,10 +301,22 @@ CRON_MINUTE="$REPLY"
 
 header "Notifications"
 
-NOTIFY_EMAIL=""
-if prompt_yn "Enable email notifications?" "n"; then
-    prompt "Email address" ""
-    NOTIFY_EMAIL="$REPLY"
+NOTIFY_LEVEL="failure"
+# Read root@pam email from Proxmox to show in summary
+PVE_ROOT_EMAIL=$(grep '^user:root@pam:' /etc/pve/user.cfg 2>/dev/null | cut -d: -f7)
+if [[ -n "$PVE_ROOT_EMAIL" ]]; then
+    echo "Proxmox root email: ${BOLD}${PVE_ROOT_EMAIL}${NC}"
+    echo "Notifications will be sent to this address on failure/warning."
+    if prompt_yn "Send emails on every run instead of just failures?" "n"; then
+        NOTIFY_LEVEL="always"
+    fi
+    if prompt_yn "Disable email notifications entirely?" "n"; then
+        NOTIFY_LEVEL="none"
+    fi
+else
+    warn "No email configured for root@pam in Proxmox — notifications disabled."
+    echo "Set root's email in Datacenter → Permissions → Users to enable notifications."
+    NOTIFY_LEVEL="none"
 fi
 
 # ─── Exclude VMs ──────────────────────────────────────────────────────────────
@@ -396,7 +408,7 @@ echo -e "  Compression:         ${BOLD}${VZDUMP_COMPRESS}${NC}"
 [[ -n "$VZDUMP_STORAGE" ]] && echo -e "  Proxmox storage:     ${BOLD}${VZDUMP_STORAGE}${NC} (backups visible in UI)"
 echo -e "  GFS retention:       ${BOLD}${GFS_DAILY}d / ${GFS_WEEKLY}w / ${GFS_MONTHLY}m${NC}"
 echo -e "  Schedule:            ${BOLD}Daily at $(printf '%02d:%02d' "$CRON_HOUR" "$CRON_MINUTE")${NC}"
-[[ -n "$NOTIFY_EMAIL" ]] && echo -e "  Notifications:       ${BOLD}${NOTIFY_EMAIL}${NC}"
+[[ "$NOTIFY_LEVEL" != "none" && -n "$PVE_ROOT_EMAIL" ]] && echo -e "  Notifications:       ${BOLD}${PVE_ROOT_EMAIL}${NC} (${NOTIFY_LEVEL} only)"
 [[ -n "$EXCLUDE_VMIDS" ]] && echo -e "  Excluded VMIDs:      ${BOLD}${EXCLUDE_VMIDS}${NC}"
 echo ""
 
@@ -459,8 +471,8 @@ VZDUMP_EXTRA_ARGS=""
 # Excluded VMs
 EXCLUDE_VMIDS="${EXCLUDE_VMIDS}"
 
-# Notifications
-NOTIFY_EMAIL="${NOTIFY_EMAIL}"
+# Notifications (uses root@pam email from Proxmox)
+NOTIFY_LEVEL="${NOTIFY_LEVEL}"
 LOG_FILE="/var/log/proxmox-backup.log"
 
 # Ansible config harvest
