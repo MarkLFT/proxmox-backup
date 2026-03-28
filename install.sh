@@ -367,7 +367,11 @@ if [[ ${#BACKUP_STORAGES[@]} -gt 0 ]]; then
 fi
 
 if [[ -z "$VZDUMP_STORAGE" ]]; then
-    if prompt_yn "Create a new Proxmox storage for VM backups?" "n"; then
+    # Default to yes for NFS/SMB (we just created the mount, likely no storage exists)
+    local create_default="n"
+    [[ "$NAS_TYPE" == "NFS" || "$NAS_TYPE" == "SMB/CIFS" ]] && create_default="y"
+
+    if prompt_yn "Create a new Proxmox storage at ${NAS_MOUNT_POINT} for VM backups?" "$create_default"; then
         prompt "Storage name" "nas-backup"
         CREATE_STORAGE_NAME="$REPLY"
         CREATE_STORAGE="yes"
