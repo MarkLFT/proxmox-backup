@@ -208,6 +208,61 @@ harvest_host_config() {
     fi
 }
 
+# ─── Host Config Files Backup ────────────────────────────────────────────────
+
+backup_host_configs() {
+    local dest_dir="$1"
+    local archive="${dest_dir}/host-configs.tar.gz"
+
+    # Directories to back up — these contain host-level service configs
+    # that aren't captured by the Ansible vars harvest.
+    local config_paths=(
+        /etc/pve
+        /etc/network
+        /etc/modprobe.d
+        /etc/modules-load.d
+        /etc/sysctl.d
+        /etc/apt/sources.list.d
+        /etc/cron.d
+        /etc/systemd/system
+        /etc/netdata
+        /etc/tailscale
+        /etc/postfix
+        /etc/ssh/sshd_config
+        /etc/fstab
+        /etc/hosts
+        /etc/hostname
+        /etc/resolv.conf
+        /var/lib/tailscale/tailscaled.state
+    )
+
+    if $DRY_RUN; then
+        log_info "[DRY-RUN] Would archive host configs to: $archive"
+        return
+    fi
+
+    # Build list of paths that actually exist
+    local existing=()
+    for p in "${config_paths[@]}"; do
+        [[ -e "$p" ]] && existing+=("$p")
+    done
+
+    if [[ ${#existing[@]} -eq 0 ]]; then
+        log_warn "No host config paths found to back up."
+        return 1
+    fi
+
+    log_info "Backing up host config files..."
+    if tar czf "$archive" "${existing[@]}" 2>/dev/null; then
+        local size
+        size=$(du -sh "$archive" | cut -f1)
+        log_info "Host configs archived: $archive ($size)"
+    else
+        log_error "Host config archive failed."
+        return 1
+    fi
+}
+
 # ─── VM / LXC Backup ─────────────────────────────────────────────────────────
 
 backup_vms() {
@@ -326,12 +381,17 @@ main() {
         fi
     fi
 
-    # 2. Back up VMs and containers
+    # 2. Back up host config files
+    if ! backup_host_configs "$dest_dir"; then
+        overall_status="PARTIAL_FAILURE"
+    fi
+
+    # 3. Back up VMs and containers
     if ! backup_vms "$dest_dir"; then
         overall_status="PARTIAL_FAILURE"
     fi
 
-    # 3. Write backup manifest
+    # 4. Write backup manifest
     if ! $DRY_RUN; then
         {
             echo "backup_date=$(date -Iseconds)"
@@ -346,7 +406,7 @@ main() {
         } > "${dest_dir}/backup-manifest.txt"
     fi
 
-    # 4. Prune old backups
+    # 5. Prune old backups
     log_info "Pruning old backups..."
     prune_old_backups "daily"   "$GFS_DAILY_KEEP"
     prune_old_backups "weekly"  "$GFS_WEEKLY_KEEP"
