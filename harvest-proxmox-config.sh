@@ -449,7 +449,6 @@ HEADER
     echo "# the new server's interface names (check with: ip link show)"
     echo "pve_network_interface_map:"
     for iface in /sys/class/net/*; do
-        local name
         name=$(basename "$iface")
         [[ "$name" == "lo" ]] && continue
         echo "  - source: ${name}    # Original interface on backed-up host"
