@@ -71,11 +71,14 @@ gather_hardware_fingerprint() {
     echo "  system_product: $(yaml_escape "$sys_product")"
 
     # Network interface mapping: name → MAC, driver, PCI address
+    # Skip VM/CT virtual interfaces (tap, veth, fwbr, fwln, fwpr) — these are
+    # ephemeral and recreated by Proxmox when VMs/CTs start.
     echo "  network_interfaces:"
     for iface in /sys/class/net/*; do
         local name
         name=$(basename "$iface")
         [[ "$name" == "lo" ]] && continue
+        [[ "$name" =~ ^(tap|veth|fwbr|fwln|fwpr) ]] && continue
         local mac driver pci_addr
         mac=$(cat "$iface/address" 2>/dev/null || echo "unknown")
         driver=$(basename "$(readlink "$iface/device/driver" 2>/dev/null)" 2>/dev/null || echo "unknown")
@@ -201,12 +204,17 @@ gather_repos() {
 
 gather_installed_packages() {
     echo "pve_extra_packages:"
-    # Capture manually-installed packages (not auto-installed dependencies)
-    # Exclude proxmox/pve/ceph base packages — those come from the role
+    # Capture manually-installed packages that aren't part of the base system.
+    # Filter out: base Debian packages (priority required/important/standard),
+    # Proxmox/PVE/Ceph packages (installed by the role), and libraries.
     comm -23 \
         <(apt-mark showmanual 2>/dev/null | sort) \
         <(dpkg-query -W -f='${Package}\n' 'proxmox-*' 'pve-*' 'ceph*' 'lib*' 2>/dev/null | sort) \
     | while read -r pkg; do
+        local priority
+        priority=$(dpkg-query -W -f='${Priority}' "$pkg" 2>/dev/null) || true
+        # Skip base system packages
+        [[ "$priority" =~ ^(required|important|standard)$ ]] && continue
         echo "  - ${pkg}"
     done
 }
@@ -513,6 +521,7 @@ HEADER
     for iface in /sys/class/net/*; do
         name=$(basename "$iface")
         [[ "$name" == "lo" ]] && continue
+        [[ "$name" =~ ^(tap|veth|fwbr|fwln|fwpr) ]] && continue
         echo "  - source: ${name}    # Original interface on backed-up host"
         echo "    target: ${name}    # ← Change this if new hardware has different NIC names"
     done
