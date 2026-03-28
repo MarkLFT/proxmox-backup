@@ -47,6 +47,7 @@ NOTIFY_EMAIL=""
 LOG_FILE="/var/log/proxmox-backup.log"
 HARVEST_ENABLED=true
 MIN_FREE_GB=50
+MIN_FREE_GB=50
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 
@@ -94,9 +95,21 @@ check_root() {
 check_mount() {
     if ! mountpoint -q "$(dirname "$BACKUP_BASE")" 2>/dev/null && \
        ! mountpoint -q "$BACKUP_BASE" 2>/dev/null; then
-        log_warn "BACKUP_BASE '$BACKUP_BASE' may not be on a mounted filesystem."
-        log_warn "Ensure your NAS is mounted before running backups."
+        log_error "BACKUP_BASE '$BACKUP_BASE' is not on a mounted filesystem."
+        log_error "Mount your NAS before running backups. Aborting."
+        exit 1
     fi
+}
+
+check_disk_space() {
+    local avail_kb
+    avail_kb=$(df --output=avail "$BACKUP_BASE" 2>/dev/null | tail -1)
+    local avail_gb=$(( avail_kb / 1024 / 1024 ))
+    if [[ "$avail_gb" -lt "$MIN_FREE_GB" ]]; then
+        log_error "Only ${avail_gb}GB free on $(df --output=target "$BACKUP_BASE" | tail -1). Need at least ${MIN_FREE_GB}GB."
+        exit 1
+    fi
+    log_info "Disk space check: ${avail_gb}GB available (minimum: ${MIN_FREE_GB}GB)"
 }
 
 check_dependencies() {
@@ -291,6 +304,7 @@ main() {
     check_root
     check_dependencies
     check_mount
+    check_disk_space
 
     local tier
     tier=$(determine_gfs_tier)
