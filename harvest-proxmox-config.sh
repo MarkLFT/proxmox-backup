@@ -217,12 +217,14 @@ gather_users_groups() {
     fi
 
     echo "pve_users:"
-    { grep '^user:' /etc/pve/user.cfg || true; } | while IFS=: read -r _ userid email firstname lastname _ _ _; do
+    { grep '^user:' /etc/pve/user.cfg || true; } | while IFS=: read -r _ userid enable expire firstname lastname email comment; do
         [[ "$userid" == "root@pam" ]] && continue
         echo "  - name: ${userid}"
-        [[ -n "$email" ]] && echo "    email: ${email}"
+        [[ -n "$enable" ]] && echo "    enable: ${enable}"
         [[ -n "$firstname" ]] && echo "    firstname: ${firstname}"
         [[ -n "$lastname" ]] && echo "    lastname: ${lastname}"
+        [[ -n "$email" ]] && echo "    email: ${email}"
+        [[ -n "$comment" ]] && echo "    comment: $(yaml_escape "$comment")"
     done
 
     echo ""
@@ -395,6 +397,66 @@ gather_datacenter_cfg() {
     fi
 }
 
+gather_tailscale() {
+    if ! command -v tailscale &>/dev/null; then
+        echo "pve_tailscale_installed: false"
+        return
+    fi
+
+    echo "pve_tailscale_installed: true"
+
+    # Capture current node status
+    local status
+    status=$(tailscale status --json 2>/dev/null) || true
+    if [[ -n "$status" ]]; then
+        local hostname
+        hostname=$(echo "$status" | jq -r '.Self.HostName // empty' 2>/dev/null) || true
+        local tailnet_ip
+        tailnet_ip=$(echo "$status" | jq -r '.TailscaleIPs[0] // empty' 2>/dev/null) || true
+        local online
+        online=$(echo "$status" | jq -r '.Self.Online // empty' 2>/dev/null) || true
+
+        [[ -n "$hostname" ]] && echo "pve_tailscale_hostname: $(yaml_escape "$hostname")"
+        [[ -n "$tailnet_ip" ]] && echo "pve_tailscale_ip: $(yaml_escape "$tailnet_ip")"
+        [[ "$online" == "true" ]] && echo "pve_tailscale_online: true"
+    fi
+
+    # Capture advertised routes and preferences from prefs
+    local prefs
+    prefs=$(tailscale debug prefs 2>/dev/null) || true
+    if [[ -n "$prefs" ]]; then
+        local routes
+        routes=$(echo "$prefs" | jq -r '.AdvertiseRoutes // [] | .[]' 2>/dev/null) || true
+        if [[ -n "$routes" ]]; then
+            echo "pve_tailscale_advertise_routes:"
+            echo "$routes" | while read -r route; do
+                echo "  - $(yaml_escape "$route")"
+            done
+        fi
+
+        local exit_node
+        exit_node=$(echo "$prefs" | jq -r '.AdvertisesExitNode // false' 2>/dev/null) || true
+        [[ "$exit_node" == "true" ]] && echo "pve_tailscale_exit_node: true"
+
+        local accept_routes
+        accept_routes=$(echo "$prefs" | jq -r '.AcceptRoutes // false' 2>/dev/null) || true
+        [[ "$accept_routes" == "true" ]] && echo "pve_tailscale_accept_routes: true"
+
+        local accept_dns
+        accept_dns=$(echo "$prefs" | jq -r '.CorpDNS // false' 2>/dev/null) || true
+        [[ "$accept_dns" == "true" ]] && echo "pve_tailscale_accept_dns: true"
+
+        local shields_up
+        shields_up=$(echo "$prefs" | jq -r '.ShieldsUp // false' 2>/dev/null) || true
+        [[ "$shields_up" == "true" ]] && echo "pve_tailscale_shields_up: true"
+    fi
+
+    # Document the recovery command
+    echo "# Recovery: after installing tailscale, re-authenticate and restore config:"
+    echo "# tailscale up --advertise-routes=<routes> --accept-routes [--advertise-exit-node]"
+    echo "# Then approve the subnet routes in the Tailscale admin console."
+}
+
 gather_vm_inventory() {
     # Not for rebuilding VMs — just a manifest of what existed
     echo "pve_vm_inventory:"
@@ -503,6 +565,10 @@ HEADER
 
     echo "# ─── Datacenter Config ───────────────────────────────────────────────────────"
     gather_datacenter_cfg
+    echo ""
+
+    echo "# ─── Tailscale / VPN ─────────────────────────────────────────────────────────"
+    gather_tailscale
     echo ""
 
     echo "# ─── Extra Packages ──────────────────────────────────────────────────────────"
