@@ -205,12 +205,13 @@ gather_repos() {
 gather_installed_packages() {
     echo "pve_extra_packages:"
     # Only capture packages the user explicitly added — not base Proxmox/Debian.
-    # Strategy: get the full dependency tree of proxmox-ve and exclude those,
-    # plus filter out libraries, base-priority packages, and known PVE components.
+    # Strategy: get the full dependency tree of proxmox-ve and related base
+    # metapackages, exclude those, then filter out known system package prefixes.
     local base_pkgs
     base_pkgs=$(apt-cache depends --recurse --no-recommends --no-suggests \
         --no-conflicts --no-breaks --no-replaces --no-enhances \
-        proxmox-ve 2>/dev/null | grep -E '^\w' | sort -u)
+        proxmox-ve grub-efi-amd64 grub-pc shim-signed zfsutils-linux \
+        2>/dev/null | grep -E '^\w' | sort -u)
 
     comm -23 \
         <(apt-mark showmanual 2>/dev/null | sort) \
@@ -219,8 +220,12 @@ gather_installed_packages() {
         local priority
         priority=$(dpkg-query -W -f='${Priority}' "$pkg" 2>/dev/null) || true
         [[ "$priority" =~ ^(required|important|standard)$ ]] && continue
-        # Skip libraries and python module packages
-        [[ "$pkg" =~ ^(lib|python3?-|fonts-|gcc-|perl-) ]] && continue
+        # Skip base system, Proxmox, and infrastructure packages
+        [[ "$pkg" =~ ^(lib|python3?[\.-]|fonts-|gcc-|perl-) ]] && continue
+        [[ "$pkg" =~ ^(grub-|shim-|gpg|gnupg|proxmox-|pve-|ceph) ]] && continue
+        [[ "$pkg" =~ ^(console-|keyboard-|systemd-|tasksel|zfs-|spl$) ]] && continue
+        [[ "$pkg" =~ ^(mokutil|efibootmgr|memtest86|sgml-base) ]] && continue
+        [[ "$pkg" =~ ^(lua-|pinentry-|krb5-|distro-info) ]] && continue
         echo "  - ${pkg}"
     done
 }
