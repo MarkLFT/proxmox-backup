@@ -96,13 +96,13 @@ check_mount() {
     # When using a named Proxmox storage, check and attempt to activate it
     if [[ -n "${VZDUMP_STORAGE:-}" ]]; then
         local storage_status
-        storage_status=$(pvesm status -storage "$VZDUMP_STORAGE" 2>/dev/null | awk 'NR>1 {print $2}')
+        storage_status=$(pvesm status -storage "$VZDUMP_STORAGE" 2>/dev/null | awk 'NR>1 {print $3}')
         if [[ "$storage_status" != "active" ]]; then
             log_warn "Storage '$VZDUMP_STORAGE' is not active (status: ${storage_status:-unknown}). Attempting to activate..."
             if pvesm set "$VZDUMP_STORAGE" --disable 0 &>/dev/null && \
                mount_output=$(pvesm mount "$VZDUMP_STORAGE" 2>&1); then
                 # Re-check status after mount attempt
-                storage_status=$(pvesm status -storage "$VZDUMP_STORAGE" 2>/dev/null | awk 'NR>1 {print $2}')
+                storage_status=$(pvesm status -storage "$VZDUMP_STORAGE" 2>/dev/null | awk 'NR>1 {print $3}')
             fi
             if [[ "$storage_status" != "active" ]]; then
                 log_error "Storage '$VZDUMP_STORAGE' could not be activated. Check your mount/NAS."
