@@ -4,7 +4,9 @@ A backup and disaster recovery solution for a single-node Proxmox VE host.
 
 1. **Host configuration** — captured as Ansible vars via a harvester script, so the host
    can be rebuilt from scratch using the `lae.proxmox` Ansible role.
-2. **VMs & containers** — backed up via `vzdump` with GFS rotation to a NAS.
+2. **Host config files** — `/etc/pve`, `/etc/network`, service configs (netdata, tailscale,
+   postfix, etc.) archived as `host-configs.tar.gz` for manual restore.
+3. **VMs & containers** — backed up via `vzdump` with GFS rotation to a NAS.
 
 ---
 
@@ -102,7 +104,32 @@ bash /opt/proxmox-backup/install-cron.sh
 bash /opt/proxmox-backup/proxmox-backup.sh
 ```
 
-This generates the Ansible host vars and takes the first VM backup.
+This generates the Ansible host vars, archives host config files, and takes the first VM backup.
+
+### What gets backed up
+
+Each backup run creates a dated directory on the NAS with:
+
+```
+/mnt/nas-backup/proxmox/daily/2026-03-28/
+├── ansible-host-vars.yml     # Ansible vars (network, storage, users, packages, etc.)
+├── host-configs.tar.gz       # Raw config files from /etc and service directories
+├── backup-manifest.txt       # Metadata about this backup run
+└── vm-backups/
+    ├── vzdump-qemu-101-*.vma.zst    # VM disk images (compressed)
+    ├── vzdump-qemu-105-*.vma.zst
+    ├── vzdump-lxc-104-*.tar.zst     # Container rootfs backups
+    └── ...
+```
+
+**`ansible-host-vars.yml`** captures the declarative config: network interfaces, storage
+backends, APT repos, users/ACLs, firewall rules, sysctl, cron jobs, Tailscale settings,
+and the list of user-installed packages. Used by the Ansible playbook to rebuild the host.
+
+**`host-configs.tar.gz`** archives the actual config files that the Ansible vars may not
+fully capture — service configs like netdata, tailscale, postfix, SSH, systemd overrides,
+and the full `/etc/pve` directory. These are restored manually after the Ansible playbook
+runs (see [Phase 6](#phase-6--post-recovery-checks)).
 
 ## GFS Rotation
 
@@ -166,7 +193,7 @@ Make sure these are in place **now**, before you ever need them:
 
 | Item | Where to keep it | Why |
 |------|-----------------|-----|
-| **NAS with backups** | On your network, separate from the PVE host | Contains VM backups + harvested Ansible config |
+| **NAS with backups** | On your network, separate from the PVE host | Contains VM backups, harvested Ansible config, and host config archive |
 | **Ansible controller** | Your workstation, laptop, or another server | Runs the recovery playbook against the new server |
 | **This repo cloned** | On the Ansible controller | Contains playbooks and roles |
 | **Ansible installed** | On the Ansible controller | `pip install ansible-core` or OS package |
@@ -910,7 +937,7 @@ This will:
 5. Create users, groups, and ACLs
 6. Apply firewall rules
 7. Set sysctl parameters and load kernel modules
-8. Install extra packages
+8. Install extra packages (only user-added packages, not base system)
 9. Restore cron jobs
 10. Apply datacenter.cfg and vzdump.conf settings
 11. Mount the NAS for VM restore
@@ -1021,9 +1048,76 @@ ansible-playbook playbooks/restore-vms.yml -i inventory/hosts.yml \
 
 ### Phase 6 — Post-Recovery Checks
 
-After VMs are restored, verify everything is working:
+After VMs are restored, restore host config files and verify everything is working.
 
-#### 6a. Check all VMs/containers
+#### 6a. Restore host config files
+
+The backup includes `host-configs.tar.gz` — an archive of service config files that
+the Ansible playbook doesn't manage. Restore selectively (don't blindly overwrite):
+
+```bash
+# SSH into the new Proxmox host
+ssh root@<new-server-ip>
+
+# Mount the NAS if not already mounted
+mount /mnt/nas-backup
+
+# List what's in the archive
+tar tzf /mnt/nas-backup/proxmox/daily/2026-03-28/host-configs.tar.gz
+
+# Extract to a temp directory first — review before overwriting
+mkdir -p /tmp/host-configs-restore
+tar xzf /mnt/nas-backup/proxmox/daily/2026-03-28/host-configs.tar.gz \
+  -C /tmp/host-configs-restore
+
+# Restore specific service configs as needed:
+# Netdata
+cp -a /tmp/host-configs-restore/etc/netdata/* /etc/netdata/
+systemctl restart netdata
+
+# Postfix
+cp -a /tmp/host-configs-restore/etc/postfix/* /etc/postfix/
+systemctl restart postfix
+
+# SSH (review sshd_config before copying — may have host-specific settings)
+diff /tmp/host-configs-restore/etc/ssh/sshd_config /etc/ssh/sshd_config
+
+# Custom systemd units
+cp -a /tmp/host-configs-restore/etc/systemd/system/* /etc/systemd/system/
+systemctl daemon-reload
+
+# Clean up
+rm -rf /tmp/host-configs-restore
+```
+
+> **Do NOT blindly restore `/etc/pve`** — the Ansible playbook already configured it.
+> Only use the archived `/etc/pve` as a reference if something looks wrong.
+
+#### 6b. Restore Tailscale
+
+If the host was running Tailscale (check `pve_tailscale_installed` in your `pve.yml`):
+
+```bash
+# Install Tailscale
+curl -fsSL https://tailscale.com/install.sh | sh
+
+# Authenticate (opens a browser URL)
+tailscale up
+
+# Restore subnet routing (check pve_tailscale_advertise_routes in pve.yml)
+tailscale set --advertise-routes=192.168.100.0/24
+
+# If it was accepting routes from other nodes:
+tailscale set --accept-routes
+
+# Then approve the subnet routes in the Tailscale admin console:
+# https://login.tailscale.com/admin/machines
+```
+
+> The old node will still appear in your Tailscale admin console. Remove it after
+> confirming the new node is working.
+
+#### 6c. Check all VMs/containers
 
 ```bash
 # List all VMs
@@ -1037,7 +1131,7 @@ qm start <vmid>
 pct start <vmid>
 ```
 
-#### 6b. Verify VM networking
+#### 6d. Verify VM networking
 
 VMs use virtual NICs connected to bridges. If you remapped physical interfaces in
 Phase 3, the bridges now point to the correct physical NIC, so VM networking should
@@ -1048,7 +1142,7 @@ If a VM can't reach the network:
 2. Check the VM's network config in the web UI: VM → Hardware → Network Device
 3. Verify the bridge has the right physical port: `cat /etc/network/interfaces`
 
-#### 6c. Verify storage
+#### 6e. Verify storage
 
 ```bash
 # Check all storage backends are accessible
@@ -1058,7 +1152,7 @@ pvesm status
 pvesm list <storage-name>
 ```
 
-#### 6d. Check services
+#### 6f. Check services
 
 ```bash
 # Proxmox services
@@ -1113,10 +1207,23 @@ See [Phase 3](#phase-3--edit-config-for-new-hardware) for detailed instructions.
 | Packages, repos, users, ACLs | Yes | Software-only |
 | Firewall, cron, sysctl | Yes | Software-only |
 | Storage (NFS/CIFS/dir) | Yes | Network or path based |
+| Host config files (netdata, postfix, etc.) | Yes | Restored manually from `host-configs.tar.gz` |
+| Tailscale / VPN | **Re-auth needed** | Config captured; re-authenticate and restore routes |
 | Network config | **Needs remap** | NIC names change per hardware |
 | Storage (LVM/ZFS on local disk) | **Needs review** | Device paths change |
 | PCIe passthrough | **Needs review** | IOMMU groups and PCI addresses change |
 | Kernel modules (modprobe) | **Usually fine** | May have old chipset-specific drivers |
+
+## Pre-flight Checks
+
+The backup script performs these checks before starting:
+
+1. **Root check** — must run as root
+2. **Mount check** — verifies `BACKUP_BASE` is on a mounted filesystem. **Aborts if not
+   mounted** to prevent backups writing to the local root partition.
+3. **Disk space check** — verifies at least `MIN_FREE_GB` (default: 50 GB) is available
+   on the backup destination. Configurable in `proxmox-backup.conf`.
+4. **Dependencies** — checks that `vzdump`, `tar`, `date`, and `find` are available
 
 ## Dependencies
 
