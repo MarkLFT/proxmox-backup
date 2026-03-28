@@ -336,15 +336,23 @@ CREATE_STORAGE=""
 CREATE_STORAGE_NAME=""
 
 # Check if any existing Proxmox storage already points at the mount
+# Parse /etc/pve/storage.cfg to match storage paths against our mount point
 MATCHING_STORAGE=""
-while IFS= read -r sid; do
-    [[ -z "$sid" ]] && continue
-    spath=$(pvesm path "${sid}:backup" 2>/dev/null | sed 's|/dump$||' || true)
-    if [[ "$spath" == "$NAS_MOUNT_POINT" || "$spath" == "$BACKUP_BASE" ]]; then
-        MATCHING_STORAGE="$sid"
-        break
-    fi
-done < <(pvesm status 2>/dev/null | awk 'NR>1 {print $1}')
+if [[ -f /etc/pve/storage.cfg ]]; then
+    current_sid=""
+    while IFS= read -r line; do
+        # Storage definition lines: "dir: storagename" or "nfs: storagename" etc.
+        if [[ "$line" =~ ^[a-z]+:\ +(.+) ]]; then
+            current_sid="${BASH_REMATCH[1]}"
+        elif [[ -n "$current_sid" && "$line" =~ ^[[:space:]]+path\ +(.+) ]]; then
+            spath="${BASH_REMATCH[1]}"
+            if [[ "$spath" == "$NAS_MOUNT_POINT" || "$NAS_MOUNT_POINT" == "$spath"/* ]]; then
+                MATCHING_STORAGE="$current_sid"
+                break
+            fi
+        fi
+    done < /etc/pve/storage.cfg
+fi
 
 if [[ -n "$MATCHING_STORAGE" ]]; then
     info "NAS mount is already registered as Proxmox storage '${MATCHING_STORAGE}'"
