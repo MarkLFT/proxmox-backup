@@ -57,12 +57,38 @@ prompt() {
     local default="${2:-}"
     if [[ -n "$default" ]]; then
         ask "${question} [${default}]: "
-        read -r REPLY
+        read -r REPLY < /dev/tty
         REPLY="${REPLY:-$default}"
     else
         ask "${question}: "
-        read -r REPLY
+        read -r REPLY < /dev/tty
     fi
+}
+
+prompt_required() {
+    # prompt_required "Question" "default_value" → sets REPLY, loops until non-empty
+    local question="$1"
+    local default="${2:-}"
+    while true; do
+        prompt "$question" "$default"
+        [[ -n "$REPLY" ]] && return
+        warn "This field is required."
+    done
+}
+
+prompt_number() {
+    # prompt_number "Question" "default" min max → sets REPLY, validates range
+    local question="$1"
+    local default="$2"
+    local min="$3"
+    local max="$4"
+    while true; do
+        prompt "$question" "$default"
+        if [[ "$REPLY" =~ ^[0-9]+$ ]] && (( REPLY >= min && REPLY <= max )); then
+            return
+        fi
+        warn "Please enter a number between ${min} and ${max}."
+    done
 }
 
 prompt_yn() {
@@ -73,7 +99,7 @@ prompt_yn() {
     [[ "$default" == "n" ]] && hint="[y/N]"
 
     ask "${question} ${hint}: "
-    read -r REPLY
+    read -r REPLY < /dev/tty
     REPLY="${REPLY:-$default}"
     [[ "$REPLY" =~ ^[yY] ]]
 }
@@ -91,7 +117,7 @@ prompt_choice() {
     echo ""
     while true; do
         ask "Choice [1-${#options[@]}]: "
-        read -r REPLY
+        read -r REPLY < /dev/tty
         if [[ "$REPLY" =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= ${#options[@]} )); then
             REPLY="${options[$((REPLY-1))]}"
             return
@@ -162,10 +188,17 @@ FSTAB_ENTRY=""
 case "$NAS_TYPE" in
     "NFS")
         echo ""
-        prompt "NAS hostname or IP address" ""
+        # Install nfs-common if missing
+        if ! dpkg -s nfs-common &>/dev/null; then
+            warn "nfs-common not found, installing..."
+            apt-get update -qq && apt-get install -y -qq nfs-common > /dev/null
+            info "nfs-common installed"
+        fi
+
+        prompt_required "NAS hostname or IP address" ""
         NAS_SERVER="$REPLY"
 
-        prompt "NFS export path (e.g., /volume1/backups)" ""
+        prompt_required "NFS export path (e.g., /volume1/backups)" ""
         NAS_EXPORT="$REPLY"
 
         prompt "Local mount point" "/mnt/nas-backup"
@@ -176,17 +209,24 @@ case "$NAS_TYPE" in
 
     "SMB/CIFS")
         echo ""
-        prompt "NAS hostname or IP address" ""
+        # Install cifs-utils if missing
+        if ! dpkg -s cifs-utils &>/dev/null; then
+            warn "cifs-utils not found, installing..."
+            apt-get update -qq && apt-get install -y -qq cifs-utils > /dev/null
+            info "cifs-utils installed"
+        fi
+
+        prompt_required "NAS hostname or IP address" ""
         NAS_SERVER="$REPLY"
 
-        prompt "Share name (e.g., backups)" ""
+        prompt_required "Share name (e.g., backups)" ""
         NAS_CIFS_SHARE="$REPLY"
 
         prompt "Username" "backup"
         NAS_CIFS_USER="$REPLY"
 
         ask "Password: "
-        read -rs NAS_CIFS_PASS
+        read -rs NAS_CIFS_PASS < /dev/tty
         echo ""
 
         prompt "Local mount point" "/mnt/nas-backup"
@@ -251,10 +291,10 @@ esac
 
 header "Backup Schedule"
 
-prompt "Hour to run daily backup (0-23, 24h format)" "2"
+prompt_number "Hour to run daily backup (0-23, 24h format)" "2" 0 23
 CRON_HOUR="$REPLY"
 
-prompt "Minute (0-59)" "0"
+prompt_number "Minute (0-59)" "0" 0 59
 CRON_MINUTE="$REPLY"
 
 # ─── Notifications ────────────────────────────────────────────────────────────
