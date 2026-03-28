@@ -115,12 +115,17 @@ Each backup run creates a dated directory on the NAS with:
 ├── ansible-host-vars.yml     # Ansible vars (network, storage, users, packages, etc.)
 ├── host-configs.tar.gz       # Raw config files from /etc and service directories
 ├── backup-manifest.txt       # Metadata about this backup run
-└── vm-backups/
+└── vm-backups/               # Only when VZDUMP_STORAGE is not set
     ├── vzdump-qemu-101-*.vma.zst    # VM disk images (compressed)
     ├── vzdump-qemu-105-*.vma.zst
     ├── vzdump-lxc-104-*.tar.zst     # Container rootfs backups
     └── ...
 ```
+
+> **Tip:** Set `VZDUMP_STORAGE` in `proxmox-backup.conf` to a named Proxmox storage
+> (e.g., `VZDUMP_STORAGE="unraid"`). Backups will be written to that storage and appear
+> directly in the Proxmox UI for easy restore. When unset, backups are written to the
+> `vm-backups/` subdirectory via `--dumpdir`.
 
 **`ansible-host-vars.yml`** captures the declarative config: network interfaces, storage
 backends, APT repos, users/ACLs, firewall rules, sysctl, cron jobs, Tailscale settings,

@@ -327,6 +327,46 @@ if prompt_yn "Exclude any VMs/containers from backup?" "n"; then
     EXCLUDE_VMIDS="$REPLY"
 fi
 
+# ─── Proxmox Storage ─────────────────────────────────────────────────────────
+
+header "Proxmox Storage"
+
+VZDUMP_STORAGE=""
+CREATE_STORAGE=""
+CREATE_STORAGE_NAME=""
+
+# Check if any existing Proxmox storage already points at the mount
+MATCHING_STORAGE=""
+while IFS= read -r sid; do
+    [[ -z "$sid" ]] && continue
+    spath=$(pvesm path "${sid}:backup" 2>/dev/null | sed 's|/dump$||' || true)
+    if [[ "$spath" == "$NAS_MOUNT_POINT" || "$spath" == "$BACKUP_BASE" ]]; then
+        MATCHING_STORAGE="$sid"
+        break
+    fi
+done < <(pvesm status 2>/dev/null | awk 'NR>1 {print $1}')
+
+if [[ -n "$MATCHING_STORAGE" ]]; then
+    info "NAS mount is already registered as Proxmox storage '${MATCHING_STORAGE}'"
+    if prompt_yn "Use '${MATCHING_STORAGE}' for VM backups? (backups will appear in the Proxmox UI)" "y"; then
+        VZDUMP_STORAGE="$MATCHING_STORAGE"
+    fi
+else
+    echo "Registering the NAS as a Proxmox storage allows VM backups to appear"
+    echo "in the Proxmox web UI, so you can browse and restore them directly."
+    echo ""
+    if prompt_yn "Register the NAS as a Proxmox storage for VM backups?" "y"; then
+        prompt "Storage name" "nas-backup"
+        CREATE_STORAGE_NAME="$REPLY"
+        CREATE_STORAGE="yes"
+        VZDUMP_STORAGE="$CREATE_STORAGE_NAME"
+    fi
+fi
+
+if [[ -z "$VZDUMP_STORAGE" ]]; then
+    info "VM backups will be written to ${BACKUP_BASE}/<tier>/vm-backups/"
+fi
+
 # ─── Confirmation ─────────────────────────────────────────────────────────────
 
 header "Installation Summary"
@@ -337,6 +377,7 @@ echo -e "  NAS type:            ${BOLD}${NAS_TYPE}${NC}"
 [[ -n "$NAS_SERVER" ]] && echo -e "  NAS server:          ${BOLD}${NAS_SERVER}${NC}"
 echo -e "  vzdump mode:         ${BOLD}${VZDUMP_MODE}${NC}"
 echo -e "  Compression:         ${BOLD}${VZDUMP_COMPRESS}${NC}"
+[[ -n "$VZDUMP_STORAGE" ]] && echo -e "  Proxmox storage:     ${BOLD}${VZDUMP_STORAGE}${NC} (backups visible in UI)"
 echo -e "  GFS retention:       ${BOLD}${GFS_DAILY}d / ${GFS_WEEKLY}w / ${GFS_MONTHLY}m${NC}"
 echo -e "  Schedule:            ${BOLD}Daily at $(printf '%02d:%02d' "$CRON_HOUR" "$CRON_MINUTE")${NC}"
 [[ -n "$NOTIFY_EMAIL" ]] && echo -e "  Notifications:       ${BOLD}${NOTIFY_EMAIL}${NC}"
@@ -391,6 +432,7 @@ GFS_MONTHLY_KEEP=${GFS_MONTHLY}
 GFS_WEEKLY_DAY=${GFS_WEEKLY_DAY}
 
 # vzdump settings
+VZDUMP_STORAGE="${VZDUMP_STORAGE}"
 VZDUMP_MODE="${VZDUMP_MODE}"
 VZDUMP_COMPRESS="${VZDUMP_COMPRESS}"
 VZDUMP_PIGZ=4
@@ -453,6 +495,28 @@ fi
 # Create backup base directory
 mkdir -p "$BACKUP_BASE"
 info "Backup directory ready: ${BACKUP_BASE}"
+
+# Register Proxmox storage if requested during configuration
+if [[ "$CREATE_STORAGE" == "yes" ]]; then
+    if pvesm add dir "$CREATE_STORAGE_NAME" --path "$NAS_MOUNT_POINT" --content vzdump 2>/dev/null; then
+        info "Proxmox storage '${CREATE_STORAGE_NAME}' created at ${NAS_MOUNT_POINT}"
+    else
+        warn "Could not create Proxmox storage (it may already exist with a different config)."
+        warn "You can add it manually: pvesm add dir ${CREATE_STORAGE_NAME} --path ${NAS_MOUNT_POINT} --content vzdump"
+        VZDUMP_STORAGE=""
+    fi
+fi
+
+# Configure retention on the Proxmox storage
+if [[ -n "$VZDUMP_STORAGE" ]]; then
+    PRUNE_SETTING="keep-daily=${GFS_DAILY},keep-weekly=${GFS_WEEKLY},keep-monthly=${GFS_MONTHLY}"
+    if pvesm set "$VZDUMP_STORAGE" --prune-backups "$PRUNE_SETTING" 2>/dev/null; then
+        info "Storage '${VZDUMP_STORAGE}' retention set: ${GFS_DAILY}d / ${GFS_WEEKLY}w / ${GFS_MONTHLY}m"
+    else
+        warn "Could not set retention on storage '${VZDUMP_STORAGE}'."
+        warn "Set it manually: pvesm set ${VZDUMP_STORAGE} --prune-backups ${PRUNE_SETTING}"
+    fi
+fi
 
 # Install cron job
 info "Installing cron job..."

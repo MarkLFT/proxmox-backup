@@ -93,12 +93,50 @@ check_root() {
 }
 
 check_mount() {
-    if ! mountpoint -q "$(dirname "$BACKUP_BASE")" 2>/dev/null && \
-       ! mountpoint -q "$BACKUP_BASE" 2>/dev/null; then
-        log_error "BACKUP_BASE '$BACKUP_BASE' is not on a mounted filesystem."
-        log_error "Mount your NAS before running backups. Aborting."
-        exit 1
+    # When using a named Proxmox storage, check and attempt to activate it
+    if [[ -n "${VZDUMP_STORAGE:-}" ]]; then
+        local storage_status
+        storage_status=$(pvesm status -storage "$VZDUMP_STORAGE" 2>/dev/null | awk 'NR>1 {print $2}')
+        if [[ "$storage_status" != "active" ]]; then
+            log_warn "Storage '$VZDUMP_STORAGE' is not active (status: ${storage_status:-unknown}). Attempting to activate..."
+            if pvesm set "$VZDUMP_STORAGE" --disable 0 &>/dev/null && \
+               mount_output=$(pvesm mount "$VZDUMP_STORAGE" 2>&1); then
+                # Re-check status after mount attempt
+                storage_status=$(pvesm status -storage "$VZDUMP_STORAGE" 2>/dev/null | awk 'NR>1 {print $2}')
+            fi
+            if [[ "$storage_status" != "active" ]]; then
+                log_error "Storage '$VZDUMP_STORAGE' could not be activated. Check your mount/NAS."
+                exit 1
+            fi
+            log_info "Storage '$VZDUMP_STORAGE' is now active."
+        else
+            log_info "Storage '$VZDUMP_STORAGE' is active."
+        fi
+        return
     fi
+
+    # Dumpdir mode: check the backup path is on a mounted filesystem
+    if mountpoint -q "$(dirname "$BACKUP_BASE")" 2>/dev/null || \
+       mountpoint -q "$BACKUP_BASE" 2>/dev/null; then
+        return
+    fi
+
+    # Not mounted — try to mount via fstab
+    log_warn "BACKUP_BASE '$BACKUP_BASE' is not on a mounted filesystem. Attempting to mount..."
+    local mount_target
+    mount_target=$(findmnt -n -o TARGET --fstab "$BACKUP_BASE" 2>/dev/null || \
+                   findmnt -n -o TARGET --fstab "$(dirname "$BACKUP_BASE")" 2>/dev/null || true)
+
+    if [[ -n "$mount_target" ]]; then
+        if mount "$mount_target" 2>/dev/null; then
+            log_info "Mounted $mount_target successfully."
+            return
+        fi
+    fi
+
+    log_error "BACKUP_BASE '$BACKUP_BASE' is not mounted and could not be mounted."
+    log_error "Mount your NAS before running backups. Aborting."
+    exit 1
 }
 
 check_disk_space() {
@@ -119,6 +157,14 @@ check_dependencies() {
             exit 1
         fi
     done
+
+    if [[ -n "${VZDUMP_STORAGE:-}" ]]; then
+        if ! pvesm status -storage "$VZDUMP_STORAGE" &>/dev/null; then
+            log_error "VZDUMP_STORAGE '$VZDUMP_STORAGE' is not a valid Proxmox storage."
+            exit 1
+        fi
+        log_info "Using Proxmox storage '$VZDUMP_STORAGE' for VM backups"
+    fi
 }
 
 # ─── GFS Logic ────────────────────────────────────────────────────────────────
@@ -267,9 +313,6 @@ backup_host_configs() {
 
 backup_vms() {
     local dest_dir="$1"
-    local vm_dir="${dest_dir}/vm-backups"
-
-    mkdir -p "$vm_dir"
 
     # Build exclusion list
     local -A excluded
@@ -295,16 +338,27 @@ backup_vms() {
 
     log_info "Backing up ${#vmids[@]} VM(s)/container(s): ${vmids[*]}"
 
+    # Use named Proxmox storage if configured, otherwise write to dumpdir
+    local vm_dir="${dest_dir}/vm-backups"
+    if [[ -z "${VZDUMP_STORAGE:-}" ]]; then
+        mkdir -p "$vm_dir"
+    fi
+
     local failed=()
     for vmid in "${vmids[@]}"; do
         log_info "Backing up VMID $vmid..."
 
         local vzdump_cmd=(vzdump "$vmid"
-            --dumpdir "$vm_dir"
             --mode "$VZDUMP_MODE"
             --compress "$VZDUMP_COMPRESS"
             --pigz "$VZDUMP_PIGZ"
         )
+
+        if [[ -n "${VZDUMP_STORAGE:-}" ]]; then
+            vzdump_cmd+=(--storage "$VZDUMP_STORAGE")
+        else
+            vzdump_cmd+=(--dumpdir "$vm_dir")
+        fi
 
         [[ "$VZDUMP_BWLIMIT" -gt 0 ]] && vzdump_cmd+=(--bwlimit "$VZDUMP_BWLIMIT")
         [[ -n "$VZDUMP_TMPDIR" ]] && vzdump_cmd+=(--tmpdir "$VZDUMP_TMPDIR")
@@ -361,6 +415,11 @@ main() {
     check_mount
     check_disk_space
 
+    local overall_status="SUCCESS"
+    local using_storage=false
+    [[ -n "${VZDUMP_STORAGE:-}" ]] && using_storage=true
+
+    # Host configs always use GFS directories on BACKUP_BASE
     local tier
     tier=$(determine_gfs_tier)
     log_info "GFS tier for today: ${tier}"
@@ -371,8 +430,6 @@ main() {
     if ! $DRY_RUN; then
         mkdir -p "$dest_dir"
     fi
-
-    local overall_status="SUCCESS"
 
     # 1. Harvest host config into Ansible vars
     if [[ "$HARVEST_ENABLED" == "true" ]]; then
@@ -401,13 +458,19 @@ main() {
             echo "tier=${tier}"
             echo "backup_mode=${VZDUMP_MODE}"
             echo "compression=${VZDUMP_COMPRESS}"
+            echo "vzdump_storage=${VZDUMP_STORAGE:-dumpdir}"
             echo "status=${overall_status}"
             echo "harvest_enabled=${HARVEST_ENABLED}"
         } > "${dest_dir}/backup-manifest.txt"
     fi
 
     # 5. Prune old backups
-    log_info "Pruning old backups..."
+    if $using_storage; then
+        # VM backup retention is managed by Proxmox storage prune-backups setting
+        log_info "VM backup retention managed by Proxmox storage '${VZDUMP_STORAGE}'"
+    fi
+    # Host config GFS directories are always pruned by the script
+    log_info "Pruning old host config backups..."
     prune_old_backups "daily"   "$GFS_DAILY_KEEP"
     prune_old_backups "weekly"  "$GFS_WEEKLY_KEEP"
     prune_old_backups "monthly" "$GFS_MONTHLY_KEEP"
@@ -420,7 +483,7 @@ main() {
     if ! $DRY_RUN && [[ -d "$dest_dir" ]]; then
         local total_size
         total_size=$(du -sh "$dest_dir" | cut -f1)
-        log_info "Total backup size: $total_size"
+        log_info "Host config backup size: $total_size"
     fi
 
     log_info "Backup completed in $((duration / 60))m $((duration % 60))s — Status: ${overall_status}"
