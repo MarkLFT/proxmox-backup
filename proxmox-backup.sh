@@ -46,6 +46,7 @@ EXCLUDE_VMIDS=""
 NOTIFY_EMAIL=""
 LOG_FILE="/var/log/proxmox-backup.log"
 HARVEST_ENABLED=true
+MIN_FREE_GB=50
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 
