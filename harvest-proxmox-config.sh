@@ -204,17 +204,23 @@ gather_repos() {
 
 gather_installed_packages() {
     echo "pve_extra_packages:"
-    # Capture manually-installed packages that aren't part of the base system.
-    # Filter out: base Debian packages (priority required/important/standard),
-    # Proxmox/PVE/Ceph packages (installed by the role), and libraries.
+    # Only capture packages the user explicitly added — not base Proxmox/Debian.
+    # Strategy: get the full dependency tree of proxmox-ve and exclude those,
+    # plus filter out libraries, base-priority packages, and known PVE components.
+    local base_pkgs
+    base_pkgs=$(apt-cache depends --recurse --no-recommends --no-suggests \
+        --no-conflicts --no-breaks --no-replaces --no-enhances \
+        proxmox-ve 2>/dev/null | grep -E '^\w' | sort -u)
+
     comm -23 \
         <(apt-mark showmanual 2>/dev/null | sort) \
-        <(dpkg-query -W -f='${Package}\n' 'proxmox-*' 'pve-*' 'ceph*' 'lib*' 2>/dev/null | sort) \
+        <(printf '%s\n' "$base_pkgs" | sort -u) \
     | while read -r pkg; do
         local priority
         priority=$(dpkg-query -W -f='${Priority}' "$pkg" 2>/dev/null) || true
-        # Skip base system packages
         [[ "$priority" =~ ^(required|important|standard)$ ]] && continue
+        # Skip libraries and python module packages
+        [[ "$pkg" =~ ^(lib|python3?-|fonts-|gcc-|perl-) ]] && continue
         echo "  - ${pkg}"
     done
 }
