@@ -108,7 +108,7 @@ gather_hardware_fingerprint() {
 
     # PCI devices (for passthrough reference)
     echo "  pci_devices:"
-    lspci -nn 2>/dev/null | grep -iE '(vga|3d|network|ethernet|nvme|raid|sas|audio)' | while read -r line; do
+    { lspci -nn 2>/dev/null | grep -iE '(vga|3d|network|ethernet|nvme|raid|sas|audio)' || true; } | while read -r line; do
         local addr
         addr=$(echo "$line" | cut -d' ' -f1)
         local desc
@@ -217,7 +217,7 @@ gather_users_groups() {
     fi
 
     echo "pve_users:"
-    grep '^user:' /etc/pve/user.cfg | while IFS=: read -r _ userid email firstname lastname _ _ _; do
+    { grep '^user:' /etc/pve/user.cfg || true; } | while IFS=: read -r _ userid email firstname lastname _ _ _; do
         [[ "$userid" == "root@pam" ]] && continue
         echo "  - name: ${userid}"
         [[ -n "$email" ]] && echo "    email: ${email}"
@@ -227,7 +227,7 @@ gather_users_groups() {
 
     echo ""
     echo "pve_groups:"
-    grep '^group:' /etc/pve/user.cfg | while IFS=: read -r _ groupid users comment; do
+    { grep '^group:' /etc/pve/user.cfg || true; } | while IFS=: read -r _ groupid users comment; do
         echo "  - name: ${groupid}"
         [[ -n "$comment" ]] && echo "    comment: $(yaml_escape "$comment")"
         if [[ -n "$users" ]]; then
@@ -241,7 +241,7 @@ gather_users_groups() {
 
     echo ""
     echo "pve_acls:"
-    grep '^acl:' /etc/pve/user.cfg | while IFS=: read -r _ propagate path principal rolename; do
+    { grep '^acl:' /etc/pve/user.cfg || true; } | while IFS=: read -r _ propagate path principal rolename; do
         echo "  - path: ${path}"
         echo "    principal: ${principal}"
         echo "    role: ${rolename}"
