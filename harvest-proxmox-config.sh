@@ -213,9 +213,22 @@ gather_installed_packages() {
         proxmox-ve grub-efi-amd64 grub-pc shim-signed zfsutils-linux \
         2>/dev/null | grep -E '^\w' | sort -u)
 
+    # Packages that are part of a standard Debian/Proxmox install but show as
+    # manually installed. Maintaining this list is simpler than trying to detect
+    # them programmatically across different Debian/PVE versions.
+    local -a base_manual=(
+        apt-transport-https attr bsd-mailx bsdextrautils btrfs-progs chrony
+        cifs-utils dirmngr eject fdutils glusterfs-client glusterfs-common
+        kbd ksm-control-daemon netcat-traditional nmap-common open-iscsi
+        parted postfix procmail psmisc smartmontools ssh ssl-cert sudo
+        usrmerge whiptail xfsprogs
+    )
+    local base_manual_sorted
+    base_manual_sorted=$(printf '%s\n' "${base_manual[@]}" | sort)
+
     comm -23 \
         <(apt-mark showmanual 2>/dev/null | sort) \
-        <(printf '%s\n' "$base_pkgs" | sort -u) \
+        <(printf '%s\n%s\n' "$base_pkgs" "$base_manual_sorted" | sort -u) \
     | while read -r pkg; do
         local priority
         priority=$(dpkg-query -W -f='${Priority}' "$pkg" 2>/dev/null) || true
