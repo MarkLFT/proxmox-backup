@@ -335,35 +335,39 @@ VZDUMP_STORAGE=""
 CREATE_STORAGE=""
 CREATE_STORAGE_NAME=""
 
-# Check if any existing Proxmox storage already points at the mount
-# Parse /etc/pve/storage.cfg to match storage paths against our mount point
-MATCHING_STORAGE=""
-if [[ -f /etc/pve/storage.cfg ]]; then
-    current_sid=""
-    while IFS= read -r line; do
-        # Storage definition lines: "dir: storagename" or "nfs: storagename" etc.
-        if [[ "$line" =~ ^[a-z]+:\ +(.+) ]]; then
-            current_sid="${BASH_REMATCH[1]}"
-        elif [[ -n "$current_sid" && "$line" =~ ^[[:space:]]+path\ +(.+) ]]; then
-            spath="${BASH_REMATCH[1]}"
-            if [[ "$spath" == "$NAS_MOUNT_POINT" || "$NAS_MOUNT_POINT" == "$spath"/* ]]; then
-                MATCHING_STORAGE="$current_sid"
-                break
-            fi
+echo "Using a Proxmox storage for VM backups means they appear in the"
+echo "Proxmox web UI, so you can browse and restore them directly."
+echo ""
+
+# Find storages that support vzdump content
+BACKUP_STORAGES=()
+while IFS= read -r sid; do
+    [[ -z "$sid" ]] && continue
+    BACKUP_STORAGES+=("$sid")
+done < <(pvesm status --content backup 2>/dev/null | awk 'NR>1 {print $1}')
+
+if [[ ${#BACKUP_STORAGES[@]} -gt 0 ]]; then
+    echo "Existing storages that support backups:"
+    echo ""
+    for sid in "${BACKUP_STORAGES[@]}"; do
+        stype=$(pvesm status -storage "$sid" 2>/dev/null | awk 'NR>1 {print $2}')
+        sstatus=$(pvesm status -storage "$sid" 2>/dev/null | awk 'NR>1 {print $3}')
+        echo -e "    ${BOLD}${sid}${NC} (${stype}, ${sstatus})"
+    done
+    echo ""
+    if prompt_yn "Use one of these for VM backups?" "y"; then
+        if [[ ${#BACKUP_STORAGES[@]} -eq 1 ]]; then
+            VZDUMP_STORAGE="${BACKUP_STORAGES[0]}"
+            info "Using '${VZDUMP_STORAGE}'"
+        else
+            prompt_choice "Which storage?" "${BACKUP_STORAGES[@]}"
+            VZDUMP_STORAGE="$REPLY"
         fi
-    done < /etc/pve/storage.cfg
+    fi
 fi
 
-if [[ -n "$MATCHING_STORAGE" ]]; then
-    info "NAS mount is already registered as Proxmox storage '${MATCHING_STORAGE}'"
-    if prompt_yn "Use '${MATCHING_STORAGE}' for VM backups? (backups will appear in the Proxmox UI)" "y"; then
-        VZDUMP_STORAGE="$MATCHING_STORAGE"
-    fi
-else
-    echo "Registering the NAS as a Proxmox storage allows VM backups to appear"
-    echo "in the Proxmox web UI, so you can browse and restore them directly."
-    echo ""
-    if prompt_yn "Register the NAS as a Proxmox storage for VM backups?" "y"; then
+if [[ -z "$VZDUMP_STORAGE" ]]; then
+    if prompt_yn "Create a new Proxmox storage for VM backups?" "n"; then
         prompt "Storage name" "nas-backup"
         CREATE_STORAGE_NAME="$REPLY"
         CREATE_STORAGE="yes"
