@@ -313,6 +313,7 @@ backup_host_configs() {
 
 backup_vms() {
     local dest_dir="$1"
+    local tier="${2:-daily}"
 
     # Build exclusion list
     local -A excluded
@@ -362,6 +363,7 @@ backup_vms() {
 
         [[ "$VZDUMP_BWLIMIT" -gt 0 ]] && vzdump_cmd+=(--bwlimit "$VZDUMP_BWLIMIT")
         [[ -n "$VZDUMP_TMPDIR" ]] && vzdump_cmd+=(--tmpdir "$VZDUMP_TMPDIR")
+        vzdump_cmd+=(--notes-template "{{guestname}} - ${tier} backup")
         # shellcheck disable=SC2206
         [[ -n "$VZDUMP_EXTRA_ARGS" ]] && vzdump_cmd+=($VZDUMP_EXTRA_ARGS)
 
@@ -458,7 +460,7 @@ main() {
     fi
 
     # 3. Back up VMs and containers
-    if ! backup_vms "$dest_dir"; then
+    if ! backup_vms "$dest_dir" "$tier"; then
         overall_status="PARTIAL_FAILURE"
     fi
 
