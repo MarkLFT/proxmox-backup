@@ -270,13 +270,13 @@ header "GFS Retention Policy"
 echo "How many backups to keep at each tier:"
 echo ""
 
-prompt "Daily backups to keep" "7"
+prompt_number "Daily backups to keep" "7" 1 365
 GFS_DAILY="$REPLY"
 
-prompt "Weekly backups to keep" "4"
+prompt_number "Weekly backups to keep" "4" 1 52
 GFS_WEEKLY="$REPLY"
 
-prompt "Monthly backups to keep" "6"
+prompt_number "Monthly backups to keep" "6" 1 24
 GFS_MONTHLY="$REPLY"
 
 prompt_choice "Day of week for weekly backups" "Sunday" "Saturday" "Friday" "Monday"
