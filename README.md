@@ -138,14 +138,29 @@ runs (see [Phase 6](#phase-6--post-recovery-checks)).
 
 ## GFS Rotation
 
-| Tier    | Kept | Trigger              |
-|---------|------|----------------------|
-| Daily   | 7    | Every run            |
-| Weekly  | 4    | Sundays              |
-| Monthly | 6    | 1st of month         |
+| Tier    | Default | Range  | Trigger              |
+|---------|---------|--------|----------------------|
+| Daily   | 7       | 1–365  | Every run            |
+| Weekly  | 4       | 1–52   | Sundays              |
+| Monthly | 6       | 1–24   | 1st of month         |
 
 A daily backup that falls on a Sunday is stored as weekly instead. A backup on the 1st
 is stored as monthly. Each day produces exactly one backup in one tier.
+
+The installer enforces a minimum of 1 for each retention tier. All three tiers must have
+at least one backup kept, which is required by Proxmox when configuring storage retention.
+
+### Backup Notes
+
+Each backup automatically includes notes visible in the Proxmox UI with the format:
+
+```text
+<VM/CT name> - <tier> backup
+```
+
+For example: `ubuntu-server - daily backup`, `pihole - weekly backup`. This uses
+vzdump's `--notes-template` with the `{{guestname}}` placeholder combined with the
+GFS tier determined for that day.
 
 ## Day-to-Day Operations
 
