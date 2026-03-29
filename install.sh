@@ -305,7 +305,7 @@ NOTIFY_LEVEL="failure"
 # Read root@pam email from Proxmox to show in summary
 PVE_ROOT_EMAIL=$(grep '^user:root@pam:' /etc/pve/user.cfg 2>/dev/null | cut -d: -f7)
 if [[ -n "$PVE_ROOT_EMAIL" ]]; then
-    echo "Proxmox root email: ${BOLD}${PVE_ROOT_EMAIL}${NC}"
+    echo -e "Proxmox root email: ${BOLD}${PVE_ROOT_EMAIL}${NC}"
     echo "Notifications will be sent to this address on failure/warning."
     if prompt_yn "Send emails on every run instead of just failures?" "n"; then
         NOTIFY_LEVEL="always"
