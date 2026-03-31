@@ -72,13 +72,6 @@ if [[ -f "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
 fi
 
-# ─── vzdump capability detection ─────────────────────────────────────────────
-# PVE 8+ deprecated --mailnotification; --notification-mode forces legacy behavior
-VZDUMP_HAS_NOTIFICATION_MODE=false
-if vzdump --help 2>&1 | grep -q -- '--notification-mode'; then
-    VZDUMP_HAS_NOTIFICATION_MODE=true
-fi
-
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
 log() {
@@ -373,10 +366,9 @@ backup_vms() {
         vzdump_cmd+=(--notes-template "{{guestname}} - ${tier} backup")
 
         # Control vzdump's own email notifications to match NOTIFY_LEVEL
-        if $VZDUMP_HAS_NOTIFICATION_MODE; then
-            # PVE 8+: force legacy mode so --mailnotification is respected
-            vzdump_cmd+=(--notification-mode legacy)
-        fi
+        # PVE 7.x: --mailnotification works natively
+        # PVE 8+/9+: flag is silently ignored; notifications are controlled via
+        #   Proxmox's notification system (Datacenter → Notifications)
         case "$NOTIFY_LEVEL" in
             always)  vzdump_cmd+=(--mailnotification always) ;;
             none)    vzdump_cmd+=(--mailnotification never) ;;

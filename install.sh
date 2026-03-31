@@ -546,6 +546,24 @@ if [[ -n "$VZDUMP_STORAGE" ]]; then
     fi
 fi
 
+# Configure Proxmox notification matcher for vzdump emails (PVE 8+/9+)
+# On PVE 7.x, pvesh won't have /cluster/notifications — the error is harmless
+if [[ "$NOTIFY_LEVEL" != "none" ]]; then
+    case "$NOTIFY_LEVEL" in
+        failure)
+            if pvesh set /cluster/notifications/matchers/default-matcher --match-severity warning,error 2>/dev/null; then
+                info "Notification matcher set to failure/warning only"
+            fi
+            ;;
+        always)
+            # Remove severity filter so all notifications get through
+            if pvesh set /cluster/notifications/matchers/default-matcher --delete match-severity 2>/dev/null; then
+                info "Notification matcher set to all events"
+            fi
+            ;;
+    esac
+fi
+
 # Install cron job
 info "Installing cron job..."
 bash "${INSTALL_DIR}/install-cron.sh" --hour "$CRON_HOUR" --min "$CRON_MINUTE"

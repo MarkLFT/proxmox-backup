@@ -20,7 +20,7 @@ A backup and disaster recovery solution for a single-node Proxmox VE host. Backs
 - **Dual backup**: Host config (Ansible vars + tar archive) + VM disk images (vzdump)
 - **Storage modes**: Named Proxmox storage (`VZDUMP_STORAGE`) or raw dumpdir on NAS
 - **Backup notes**: Automatically set via `--notes-template "{{guestname}} - ${tier} backup"`
-- **Notifications**: Email via Proxmox's root@pam, configurable level (failure/always/none). `NOTIFY_LEVEL` controls both the script's own summary email and vzdump's `--mailnotification` flag
+- **Notifications**: Email via Proxmox's root@pam, configurable level (failure/always/none). `NOTIFY_LEVEL` controls both the script's own summary email and vzdump notifications. On PVE 7.x this uses `--mailnotification`; on PVE 8+/9+ the installer configures the Proxmox notification matcher via `pvesh` (vzdump's `--mailnotification` flag is silently ignored on these versions)
 
 ## Installer Validation Rules
 
