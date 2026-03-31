@@ -366,10 +366,11 @@ backup_vms() {
         vzdump_cmd+=(--notes-template "{{guestname}} - ${tier} backup")
 
         # Control vzdump's own email notifications to match NOTIFY_LEVEL
+        # PVE 8.1+ uses --notification-policy (--mailnotification is deprecated/ignored)
         case "$NOTIFY_LEVEL" in
-            always)  vzdump_cmd+=(--mailnotification always) ;;
-            none)    vzdump_cmd+=(--mailto "" ) ;;
-            *)       vzdump_cmd+=(--mailnotification failure) ;;
+            always)  vzdump_cmd+=(--notification-policy always --mailnotification always) ;;
+            none)    vzdump_cmd+=(--notification-policy never --mailnotification never) ;;
+            *)       vzdump_cmd+=(--notification-policy failure --mailnotification failure) ;;
         esac
         # shellcheck disable=SC2206
         [[ -n "$VZDUMP_EXTRA_ARGS" ]] && vzdump_cmd+=($VZDUMP_EXTRA_ARGS)
