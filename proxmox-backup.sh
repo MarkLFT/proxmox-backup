@@ -364,6 +364,13 @@ backup_vms() {
         [[ "$VZDUMP_BWLIMIT" -gt 0 ]] && vzdump_cmd+=(--bwlimit "$VZDUMP_BWLIMIT")
         [[ -n "$VZDUMP_TMPDIR" ]] && vzdump_cmd+=(--tmpdir "$VZDUMP_TMPDIR")
         vzdump_cmd+=(--notes-template "{{guestname}} - ${tier} backup")
+
+        # Control vzdump's own email notifications to match NOTIFY_LEVEL
+        case "$NOTIFY_LEVEL" in
+            always)  vzdump_cmd+=(--mailnotification always) ;;
+            none)    vzdump_cmd+=(--mailto "" ) ;;
+            *)       vzdump_cmd+=(--mailnotification failure) ;;
+        esac
         # shellcheck disable=SC2206
         [[ -n "$VZDUMP_EXTRA_ARGS" ]] && vzdump_cmd+=($VZDUMP_EXTRA_ARGS)
 
