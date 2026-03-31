@@ -72,6 +72,13 @@ if [[ -f "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
 fi
 
+# ─── vzdump capability detection ─────────────────────────────────────────────
+# PVE 8+ deprecated --mailnotification; --notification-mode forces legacy behavior
+VZDUMP_HAS_NOTIFICATION_MODE=false
+if vzdump --help 2>&1 | grep -q -- '--notification-mode'; then
+    VZDUMP_HAS_NOTIFICATION_MODE=true
+fi
+
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
 log() {
@@ -366,11 +373,14 @@ backup_vms() {
         vzdump_cmd+=(--notes-template "{{guestname}} - ${tier} backup")
 
         # Control vzdump's own email notifications to match NOTIFY_LEVEL
-        # PVE 8.1+ uses --notification-policy (--mailnotification is deprecated/ignored)
+        if $VZDUMP_HAS_NOTIFICATION_MODE; then
+            # PVE 8+: force legacy mode so --mailnotification is respected
+            vzdump_cmd+=(--notification-mode legacy)
+        fi
         case "$NOTIFY_LEVEL" in
-            always)  vzdump_cmd+=(--notification-policy always --mailnotification always) ;;
-            none)    vzdump_cmd+=(--notification-policy never --mailnotification never) ;;
-            *)       vzdump_cmd+=(--notification-policy failure --mailnotification failure) ;;
+            always)  vzdump_cmd+=(--mailnotification always) ;;
+            none)    vzdump_cmd+=(--mailnotification never) ;;
+            *)       vzdump_cmd+=(--mailnotification failure) ;;
         esac
         # shellcheck disable=SC2206
         [[ -n "$VZDUMP_EXTRA_ARGS" ]] && vzdump_cmd+=($VZDUMP_EXTRA_ARGS)
